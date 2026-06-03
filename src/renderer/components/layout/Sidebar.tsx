@@ -34,7 +34,7 @@ const navItems = [
 export function Sidebar({ currentView, onViewChange, isCollapsed, onCollapseToggle }: SidebarProps) {
   return (
     <nav className={cn(
-      "fixed left-0 top-0 h-full w-[240px] z-50 bg-surface-container-low border-r border-outline-variant/60 flex flex-col transition-all duration-300 ease-in-out",
+      "fixed left-0 top-[32px] h-[calc(100%-32px)] w-[240px] z-50 bg-surface-container-low border-r border-outline-variant/60 flex flex-col transition-all duration-300 ease-in-out",
       isCollapsed ? "-translate-x-full md:pointer-events-none" : "translate-x-0"
     )}>
       <div className="px-5 h-[64px] flex items-center justify-between shrink-0 border-b border-outline-variant/10">
@@ -46,9 +46,9 @@ export function Sidebar({ currentView, onViewChange, isCollapsed, onCollapseTogg
             鲸杉 GEO
           </span>
         </div>
-        <button 
+        <button
           onClick={onCollapseToggle}
-          className="p-1 rounded hover:bg-surface-container text-on-surface-variant hover:text-primary transition-colors cursor-pointer"
+          className="p-1 rounded text-on-surface-variant hover:text-primary transition-colors cursor-pointer"
           title="收起侧边栏"
         >
           <ChevronLeft className="w-4 h-4" />

@@ -117,6 +117,13 @@ function createSchema(database) {
       project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
       kind TEXT NOT NULL DEFAULT 'chat',
       title TEXT NOT NULL,
+      summary TEXT,
+      summary_model TEXT,
+      summary_updated_at TEXT,
+      summary_message_count INTEGER NOT NULL DEFAULT 0,
+      summary_dirty INTEGER NOT NULL DEFAULT 0,
+      message_count INTEGER NOT NULL DEFAULT 0,
+      last_message_preview TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -239,6 +246,94 @@ function createSchema(database) {
 
     CREATE INDEX IF NOT EXISTS idx_evolution_rules_project_status
       ON evolution_rules(project_id, status, created_at);
+  `);
+  migrateSchema(database);
+}
+
+function migrateSchema(database) {
+  // 检查 conversations.project_id 是否仍然是 NOT NULL，如果是则改为允许 NULL
+  const convColumns = database.prepare('PRAGMA table_info(conversations)').all();
+  const convProjectId = convColumns.find((c) => c.name === 'project_id');
+  if (convProjectId && convProjectId.notnull === 1) {
+    // SQLite 无法直接 ALTER COLUMN，需要重建表
+    database.exec(`
+      CREATE TABLE conversations_new (
+        id TEXT PRIMARY KEY,
+        project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL DEFAULT 'chat',
+        title TEXT NOT NULL,
+        summary TEXT,
+        summary_model TEXT,
+        summary_updated_at TEXT,
+        summary_message_count INTEGER NOT NULL DEFAULT 0,
+        summary_dirty INTEGER NOT NULL DEFAULT 0,
+        message_count INTEGER NOT NULL DEFAULT 0,
+        last_message_preview TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO conversations_new SELECT * FROM conversations;
+      DROP TABLE conversations;
+      ALTER TABLE conversations_new RENAME TO conversations;
+      CREATE INDEX IF NOT EXISTS idx_conversations_project_kind_updated ON conversations(project_id, kind, updated_at);
+    `);
+  }
+
+  // 检查 messages.project_id 是否仍然是 NOT NULL，如果是则改为允许 NULL
+  const msgColumns = database.prepare('PRAGMA table_info(messages)').all();
+  const msgProjectId = msgColumns.find((c) => c.name === 'project_id');
+  if (msgProjectId && msgProjectId.notnull === 1) {
+    database.exec(`
+      CREATE TABLE messages_new (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+        project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        metadata_json TEXT,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO messages_new SELECT * FROM messages;
+      DROP TABLE messages;
+      ALTER TABLE messages_new RENAME TO messages;
+      CREATE INDEX IF NOT EXISTS idx_messages_conversation_created ON messages(conversation_id, created_at);
+    `);
+  }
+
+  const columns = database.prepare('PRAGMA table_info(conversations)').all();
+  const existing = new Set(columns.map((column) => column.name));
+  const addColumn = (name, definition) => {
+    if (!existing.has(name)) {
+      database.exec(`ALTER TABLE conversations ADD COLUMN ${name} ${definition}`);
+    }
+  };
+
+  addColumn('summary', 'TEXT');
+  addColumn('summary_model', 'TEXT');
+  addColumn('summary_updated_at', 'TEXT');
+  addColumn('summary_message_count', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn('summary_dirty', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn('message_count', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn('last_message_preview', 'TEXT');
+
+  database.exec(`
+    UPDATE conversations
+    SET message_count = (
+      SELECT COUNT(*)
+      FROM messages
+      WHERE messages.conversation_id = conversations.id
+    )
+    WHERE message_count = 0;
+
+    UPDATE conversations
+    SET last_message_preview = (
+      SELECT substr(replace(replace(content, char(10), ' '), char(13), ' '), 1, 120)
+      FROM messages
+      WHERE messages.conversation_id = conversations.id
+      ORDER BY datetime(created_at) DESC
+      LIMIT 1
+    )
+    WHERE last_message_preview IS NULL;
   `);
 }
 

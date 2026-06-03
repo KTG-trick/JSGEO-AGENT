@@ -27,7 +27,7 @@ export function Layout({ currentView, onViewChange, children }: LayoutProps) {
   }, []);
 
   return (
-    <div className="min-h-screen bg-background text-on-surface font-sans flex antialiased relative">
+    <div className="flex-1 bg-background text-on-surface font-sans flex antialiased relative overflow-hidden">
       {/* Dim overlay/backdrop for mobile and tight screens when sidebar is expanded */}
       {!isCollapsed && (
         <div 
@@ -52,7 +52,7 @@ export function Layout({ currentView, onViewChange, children }: LayoutProps) {
         />
         
         <main className={cn(
-          "flex-1 overflow-y-auto mt-[64px] pb-xl w-full transition-all duration-300 relative pt-4",
+          "flex-1 overflow-y-auto mt-[96px] pb-xl w-full transition-all duration-300 relative pt-4",
           isCollapsed ? "md:pl-0" : "md:pl-[240px]"
         )}>
           <div className="relative z-10 w-full h-full">

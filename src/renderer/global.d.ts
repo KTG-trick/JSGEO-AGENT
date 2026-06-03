@@ -202,9 +202,16 @@ declare global {
   type GeoAgentConversationSummary = {
     id: string;
     project_id?: string | null;
+    kind?: string;
     title: string;
+    summary?: string | null;
+    summary_model?: string | null;
+    summary_updated_at?: string | null;
+    summary_message_count?: number;
+    summary_dirty?: boolean;
     message_count: number;
     last_message?: string | null;
+    last_message_preview?: string | null;
     created_at: string;
     updated_at: string;
   };
@@ -396,6 +403,12 @@ declare global {
 
   interface Window {
     geoAgent?: {
+      // 窗口控制
+      windowMinimize: () => Promise<void>;
+      windowMaximize: () => Promise<void>;
+      windowClose: () => Promise<void>;
+      windowIsMaximized: () => Promise<boolean>;
+      onWindowMaximizedChanged: (callback: (isMaximized: boolean) => void) => void;
       healthCheck: () => Promise<{ ok: boolean; service: string }>;
       getConfigStatus: () => Promise<{
         providers: Record<
@@ -487,14 +500,16 @@ declare global {
         geoProjectId: string,
         platform: 'doubao' | 'deepseek',
         messageId: string | null | undefined,
+        conversationId: string | null | undefined,
         onEvent: (event: {
-          type: 'meta' | 'status' | 'summary_delta' | 'result' | 'done' | 'error';
+          type: 'meta' | 'status' | 'summary_delta' | 'reasoning_delta' | 'result' | 'done' | 'error';
           step_index?: number;
           step_label?: string;
           message?: string;
           text?: string;
           content?: string;
           report?: GeoAgentGeoReport;
+          question_set?: GeoAgentGeoQuestionSet;
           status?: string;
           error?: string;
         }) => void
@@ -579,12 +594,19 @@ declare global {
       getConversations: (projectId?: string | null, limit?: number) => Promise<{
         conversations: GeoAgentConversationSummary[];
       }>;
+      getPublicConversations: (limit?: number) => Promise<{
+        conversations: GeoAgentConversationSummary[];
+      }>;
       getConversation: (conversationId: string) => Promise<{
         conversation: GeoAgentConversationSummary;
         messages: GeoAgentConversationMessage[];
       }>;
+      touchConversationSummary?: (
+        conversationId: string,
+        reason?: 'manual' | 'switch' | 'history_open' | 'new_conversation' | string
+      ) => Promise<{ updated: boolean; conversation: GeoAgentConversationSummary | null }>;
       deleteConversation: (conversationId: string) => Promise<{ ok: boolean }>;
-      clearConversationHistory: () => Promise<{ ok: boolean; backup_path: string }>;
+      clearConversationHistory: (payload: { projectId?: string | null; scope?: 'project' | 'all' }) => Promise<{ ok: boolean; scope?: string; project_id?: string }>;
       getKnowledgeEntries: (projectId?: string | null, limit?: number) => Promise<GeoAgentKnowledgeEntriesResponse>;
       createKnowledgeEntry: (entry: {
         content: string;
@@ -666,7 +688,9 @@ declare global {
       }>;
       confirmKnowledgeDraft: (
         draftId: string,
-        profile?: GeoAgentEnterpriseProfileInput | null
+        profile?: GeoAgentEnterpriseProfileInput | null,
+        conversationId?: string | null,
+        draft?: GeoAgentKnowledgeDraft | null
       ) => Promise<GeoAgentKnowledgeDraftConfirmResponse>;
       rejectKnowledgeDraft: (draftId: string) => Promise<{ ok: boolean }>;
       reindexKnowledge: (projectId: string) => Promise<GeoAgentKnowledgeIndexStatus>;

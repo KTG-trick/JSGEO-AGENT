@@ -7,7 +7,10 @@ import { ViewState } from '../../types';
 const CURRENT_CONVERSATION_STORAGE_PREFIX = 'geo-agent-current-conversation-id';
 const PHASE_TWO_PROMPT_STORAGE_KEY = 'geo-agent-phase-two-prompts-v2';
 
-function conversationStorageKey(projectId?: string | null) {
+function conversationStorageKey(projectId?: string | null, conversationId?: string | null) {
+  if (conversationId) {
+    return `${CURRENT_CONVERSATION_STORAGE_PREFIX}:conv:${conversationId}`;
+  }
   return `${CURRENT_CONVERSATION_STORAGE_PREFIX}:${projectId || 'global'}`;
 }
 
@@ -38,6 +41,14 @@ function clearConversationStorage() {
   }
 }
 
+function conversationDisplayTitle(conversation?: GeoAgentConversationSummary | null) {
+  return conversation?.summary || conversation?.title || '新对话';
+}
+
+function conversationPreview(conversation: GeoAgentConversationSummary) {
+  return conversation.last_message_preview || conversation.last_message || null;
+}
+
 interface HeaderProps {
   currentView: ViewState;
   isSidebarCollapsed: boolean;
@@ -48,6 +59,7 @@ export function Header({ currentView, isSidebarCollapsed, onToggleSidebar }: Hea
   const { currentEnterpriseId, currentEnterprise, setEnterpriseId, enterprises, hasEnterprises, isLoadingEnterprises } = useEnterprise();
   const [isOpen, setIsOpen] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [publicConversations, setPublicConversations] = useState<GeoAgentConversationSummary[]>([]);
   const [conversations, setConversations] = useState<GeoAgentConversationSummary[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const historyRef = useRef<HTMLDivElement | null>(null);
@@ -83,19 +95,39 @@ export function Header({ currentView, isSidebarCollapsed, onToggleSidebar }: Hea
     if (!currentConversationId) {
       return '新对话';
     }
-    return conversations.find((conversation) => conversation.id === currentConversationId)?.title ?? '当前会话';
+    return conversationDisplayTitle(conversations.find((conversation) => conversation.id === currentConversationId)) ?? '当前会话';
   }, [currentConversationId, conversations]);
-  const groupedConversations = useMemo(() => groupConversations(conversations), [conversations]);
+const groupedConversations = useMemo(() => {
+    return groupConversations([...publicConversations, ...conversations]);
+  }, [publicConversations, conversations]);
   const currentConversationStorageKey = conversationStorageKey(currentEnterprise?.id);
 
   const refreshConversations = () => {
-    if (currentView !== 'agent' || !hasEnterprises || !window.geoAgent?.getConversations) {
+    if (currentView !== 'agent') {
+      setConversations([]);
+      setPublicConversations([]);
+      return;
+    }
+    // 获取公共对话（始终显示）
+    if (window.geoAgent?.getPublicConversations) {
+      window.geoAgent.getPublicConversations(20)
+        .then((response) => setPublicConversations(response.conversations ?? []))
+        .catch(() => setPublicConversations([]));
+    } else {
+      setPublicConversations([]);
+    }
+    // 获取当前知识库的对话
+    if (!hasEnterprises) {
       setConversations([]);
       return;
     }
-    window.geoAgent.getConversations(currentEnterprise.id, 40)
-      .then((response) => setConversations(response.conversations ?? []))
-      .catch(() => setConversations([]));
+if (window.geoAgent?.getConversations) {
+      window.geoAgent.getConversations(currentEnterprise.id, 40)
+        .then((response) => setConversations(response.conversations ?? []))
+        .catch(() => setConversations([]));
+    } else {
+      setConversations([]);
+    }
   };
 
   useEffect(() => {
@@ -157,6 +189,11 @@ export function Header({ currentView, isSidebarCollapsed, onToggleSidebar }: Hea
   };
 
   const startNewConversation = () => {
+    if (currentConversationId && window.geoAgent?.touchConversationSummary) {
+      window.geoAgent.touchConversationSummary(currentConversationId, 'new_conversation')
+        .then(() => refreshConversations())
+        .catch(() => undefined);
+    }
     window.dispatchEvent(new CustomEvent('geo-agent-new-conversation'));
     setCurrentConversationId(null);
     localStorage.removeItem(currentConversationStorageKey);
@@ -191,16 +228,16 @@ export function Header({ currentView, isSidebarCollapsed, onToggleSidebar }: Hea
 
   return (
     <header className={cn(
-      "bg-background/85 backdrop-blur-md fixed top-0 w-full h-[64px] z-40 flex justify-between items-center px-6 border-b border-outline-variant/40 transition-all duration-300",
+      "bg-background fixed top-[32px] w-full h-[64px] z-40 flex justify-between items-center px-6 border-b border-outline-variant/40 transition-all duration-300",
       isSidebarCollapsed ? "md:pl-[24px]" : "md:pl-[240px]"
     )}>
       
       {/* Left side: Sidebar Toggle and active page controls */}
       <div className="relative flex min-w-0 items-center gap-3">
         {isSidebarCollapsed && (
-          <button 
+          <button
             onClick={onToggleSidebar}
-            className="p-1 rounded hover:bg-surface-variant text-on-surface-variant hover:text-primary transition-colors cursor-pointer mr-1"
+            className="p-1 rounded text-on-surface-variant hover:text-primary transition-colors cursor-pointer mr-1"
             title="展开侧边栏"
           >
             <Menu className="w-5 h-5" />
@@ -236,8 +273,10 @@ export function Header({ currentView, isSidebarCollapsed, onToggleSidebar }: Hea
                   </div>
                   <div className="max-h-[420px] overflow-y-auto px-1 pb-1">
                     {groupedConversations.length > 0 ? groupedConversations.map((group) => (
-                      <div className="pb-2" key={group.label}>
-                        <div className="px-2 py-2 text-[12px] font-bold text-on-surface-variant/70">
+                      <div className="pb-2" key={`${group.label}-${group.isPublic ? 'public' : 'kb'}-${group.isGeo ? 'geo' : 'chat'}`}>
+                        <div className="px-2 py-2 flex items-center gap-1 text-[12px] font-bold text-on-surface-variant/70">
+                          {group.isPublic && <Globe className="h-3 w-3" />}
+                          {group.isGeo && !group.isPublic && <Building2 className="h-3 w-3" />}
                           {group.label}
                         </div>
                         <div className="space-y-1">
@@ -256,15 +295,23 @@ export function Header({ currentView, isSidebarCollapsed, onToggleSidebar }: Hea
                                 onClick={() => openConversation(conversation.id)}
                                 type="button"
                               >
-                                <span className="min-w-0 flex-1 truncate">{conversation.title}</span>
+                                <span className="min-w-0 flex-1 flex items-center gap-1.5">
+                                  {conversation.kind === 'geo_workflow' && <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary font-medium">GEO</span>}
+                                  <span className="block truncate">{conversationDisplayTitle(conversation)}</span>
+                                </span>
+                                {conversationPreview(conversation) && (
+                                  <span className="mt-0.5 block truncate text-[11px] font-medium text-on-surface-variant/65">
+                                    {conversationPreview(conversation)}
+                                  </span>
+                                )}
                                 {currentConversationId === conversation.id && <Check className="h-4 w-4 shrink-0 text-primary" />}
                               </button>
                               <button
-                                aria-label={`删除对话：${conversation.title}`}
+                                aria-label={`删除对话：${conversationDisplayTitle(conversation)}`}
                                 className="mr-1 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-on-surface-variant/50 opacity-0 transition-all hover:bg-error/10 hover:text-error group-hover/history-row:opacity-100 focus-visible:opacity-100"
                                 onClick={(event) => {
                                   event.stopPropagation();
-                                  deleteConversation(conversation.id, conversation.title);
+                                  deleteConversation(conversation.id, conversationDisplayTitle(conversation));
                                 }}
                                 title="删除对话"
                                 type="button"
@@ -409,23 +456,59 @@ const groupConversations = (items: GeoAgentConversationSummary[]) => {
   startOfYesterday.setDate(startOfYesterday.getDate() - 1);
   const startOfPreviousWeek = new Date(startOfToday);
   startOfPreviousWeek.setDate(startOfPreviousWeek.getDate() - 7);
-  const labels = ['Today', 'Yesterday', 'Previous 7 days', 'Earlier'];
-  const byLabel = new Map(labels.map((label) => [label, [] as GeoAgentConversationSummary[]]));
 
-  items.forEach((conversation) => {
-    const date = parseConversationDate(conversation.updated_at);
-    if (!date || date < startOfPreviousWeek) {
-      byLabel.get('Earlier')?.push(conversation);
-    } else if (date >= startOfToday) {
-      byLabel.get('Today')?.push(conversation);
-    } else if (date >= startOfYesterday) {
-      byLabel.get('Yesterday')?.push(conversation);
-    } else {
-      byLabel.get('Previous 7 days')?.push(conversation);
-    }
-  });
+  // 公共对话分组
+  const publicItems = items.filter((c) => !c.project_id);
+  const publicGeoItems = publicItems.filter((c) => c.kind === 'geo_workflow');
+  const publicChatItems = publicItems.filter((c) => c.kind !== 'geo_workflow');
 
-  return labels
-    .map((label) => ({ label, items: byLabel.get(label) ?? [] }))
-    .filter((group) => group.items.length > 0);
+  // 知识库对话分组
+  const kbItems = items.filter((c) => !!c.project_id);
+  const kbGeoItems = kbItems.filter((c) => c.kind === 'geo_workflow');
+  const kbChatItems = kbItems.filter((c) => c.kind !== 'geo_workflow');
+
+  const groupByDate = (convs: GeoAgentConversationSummary[]) => {
+    const labels = ['Today', 'Yesterday', 'Previous 7 days', 'Earlier'];
+    const byLabel = new Map(labels.map((label) => [label, [] as GeoAgentConversationSummary[]]));
+    convs.forEach((conversation) => {
+      const date = parseConversationDate(conversation.updated_at);
+      if (!date || date < startOfPreviousWeek) {
+        byLabel.get('Earlier')?.push(conversation);
+      } else if (date >= startOfToday) {
+        byLabel.get('Today')?.push(conversation);
+      } else if (date >= startOfYesterday) {
+        byLabel.get('Yesterday')?.push(conversation);
+      } else {
+        byLabel.get('Previous 7 days')?.push(conversation);
+      }
+    });
+    return labels
+      .map((label) => ({ label, items: byLabel.get(label) ?? [] }))
+      .filter((group) => group.items.length > 0);
+  };
+
+  const result: Array<{ label: string; isPublic?: boolean; isGeo?: boolean; items: GeoAgentConversationSummary[] }> = [];
+
+  // 公共对话
+  if (publicChatItems.length > 0) {
+    result.push({ label: '公共对话', isPublic: true, isGeo: false, items: [] });
+    const grouped = groupByDate(publicChatItems);
+    grouped.forEach((g) => result.push({ label: g.label, isPublic: true, isGeo: false, items: g.items }));
+  }
+  if (publicGeoItems.length > 0) {
+    const grouped = groupByDate(publicGeoItems);
+    grouped.forEach((g) => result.push({ label: g.label, isPublic: true, isGeo: true, items: g.items }));
+  }
+
+  // 知识库对话
+  if (kbChatItems.length > 0) {
+    const grouped = groupByDate(kbChatItems);
+    grouped.forEach((g) => result.push({ label: g.label, isGeo: false, items: g.items }));
+  }
+  if (kbGeoItems.length > 0) {
+    const grouped = groupByDate(kbGeoItems);
+    grouped.forEach((g) => result.push({ label: g.label, isGeo: true, items: g.items }));
+  }
+
+  return result;
 };

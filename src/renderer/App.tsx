@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Layout } from './components/layout/Layout';
+import { TitleBar } from './components/layout/TitleBar';
 import { Dashboard } from './views/Dashboard';
 import { AgentStudio } from './views/AgentStudio';
 import { KnowledgeBase } from './views/KnowledgeBase';
@@ -14,7 +15,7 @@ import { AutoLearning } from './views/AutoLearning';
 import { WebBuilder } from './views/WebBuilder';
 import { ViewState } from './types';
 import { EnterpriseProvider } from './context/EnterpriseContext';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion } from 'motion/react';
 
 export default function App() {
   const [currentView, setCurrentView] = useState<ViewState>('dashboard');
@@ -30,44 +31,35 @@ export default function App() {
     return () => window.removeEventListener('geo-agent-open-view', handleOpenView);
   }, []);
 
-  const renderView = () => {
-    switch (currentView) {
-      case 'dashboard':
-        return <Dashboard />;
-      case 'agent':
-        return <AgentStudio />;
-      case 'knowledge':
-        return <KnowledgeBase />;
-      case 'drafts':
-        return <Drafts />;
-      case 'projects':
-        return <Projects />;
-      case 'learning':
-        return <AutoLearning />;
-      case 'marketplace':
-        return <WebBuilder />;
-      default:
-        return <Dashboard />;
-    }
-  };
+  const views = useMemo(() => [
+    ['dashboard', <Dashboard key="dashboard" />],
+    ['agent', <AgentStudio key="agent" />],
+    ['knowledge', <KnowledgeBase key="knowledge" />],
+    ['drafts', <Drafts key="drafts" />],
+    ['projects', <Projects key="projects" />],
+    ['learning', <AutoLearning key="learning" />],
+    ['marketplace', <WebBuilder key="marketplace" />],
+  ] as const, []);
 
   return (
-    <EnterpriseProvider>
-      <Layout currentView={currentView} onViewChange={setCurrentView}>
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={currentView}
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -12 }}
-            transition={{ duration: 0.18, ease: 'easeOut' }}
-            className="w-full h-full"
-          >
-            {renderView()}
-          </motion.div>
-        </AnimatePresence>
-      </Layout>
-    </EnterpriseProvider>
+    <div className="h-screen w-screen flex flex-col overflow-hidden">
+      <TitleBar />
+      <EnterpriseProvider>
+        <Layout currentView={currentView} onViewChange={setCurrentView}>
+          {views.map(([view, element]) => (
+            <motion.div
+              animate={{ opacity: currentView === view ? 1 : 0, y: currentView === view ? 0 : 12 }}
+              className={currentView === view ? 'h-full w-full' : 'hidden'}
+              initial={false}
+              key={view}
+              transition={{ duration: 0.18, ease: 'easeOut' }}
+            >
+              {element}
+            </motion.div>
+          ))}
+        </Layout>
+      </EnterpriseProvider>
+    </div>
   );
 }
 

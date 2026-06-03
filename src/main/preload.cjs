@@ -28,6 +28,14 @@ function invokeStream(channelName, payload, onEvent) {
 }
 
 contextBridge.exposeInMainWorld('geoAgent', {
+  // 窗口控制
+  windowMinimize: () => ipcRenderer.invoke('geo-agent:window-minimize'),
+  windowMaximize: () => ipcRenderer.invoke('geo-agent:window-maximize'),
+  windowClose: () => ipcRenderer.invoke('geo-agent:window-close'),
+  windowIsMaximized: () => ipcRenderer.invoke('geo-agent:window-is-maximized'),
+  onWindowMaximizedChanged: (callback) => {
+    ipcRenderer.on('geo-agent:window-maximized-changed', (_, isMaximized) => callback(isMaximized));
+  },
   healthCheck: () => ipcRenderer.invoke('geo-agent:health-check'),
   getConfigStatus: () => ipcRenderer.invoke('geo-agent:get-config-status'),
   sendChatStream: (message, conversationId, selectedModelOrOptions = null, optionsOrEvent = {}, maybeOnEvent) => {
@@ -91,7 +99,7 @@ contextBridge.exposeInMainWorld('geoAgent', {
   confirmGeoPhaseTwo: (geoProjectId, platform, messageId) => ipcRenderer.invoke('geo-agent:confirm-geo-phase-two', geoProjectId, platform, messageId),
   cancelGeoPhaseTwo: (geoProjectId, platform, messageId) => ipcRenderer.invoke('geo-agent:cancel-geo-phase-two', geoProjectId, platform, messageId),
   runGeoPhaseTwoReport: (geoProjectId, platform, messageId) => ipcRenderer.invoke('geo-agent:run-geo-phase-two-report', geoProjectId, platform, messageId),
-  runGeoPhaseTwoReportStream: (geoProjectId, platform, messageId, onEvent) => invokeStream('geo-agent:run-geo-phase-two-report-stream', { geoProjectId, platform, messageId }, onEvent),
+  runGeoPhaseTwoReportStream: (geoProjectId, platform, messageId, conversationId, onEvent) => invokeStream('geo-agent:run-geo-phase-two-report-stream', { geoProjectId, platform, messageId, conversationId }, onEvent),
   getLatestGeoReport: (geoProjectId, platform) => ipcRenderer.invoke('geo-agent:get-latest-geo-report', geoProjectId, platform),
   getGeoReport: (reportId) => ipcRenderer.invoke('geo-agent:get-geo-report', reportId),
   getLatestGeoQuestionSet: (geoProjectId, platform) => ipcRenderer.invoke('geo-agent:get-latest-geo-question-set', geoProjectId, platform),
@@ -109,10 +117,12 @@ contextBridge.exposeInMainWorld('geoAgent', {
   getGeoArticleDraft: (articleId) => ipcRenderer.invoke('geo-agent:get-geo-article-draft', articleId),
   confirmGeoArticleDraft: (articleId, messageId = null) => ipcRenderer.invoke('geo-agent:confirm-geo-article-draft', articleId, messageId),
   updateGeoArticleDraft: (articleId, draft, messageId = null) => ipcRenderer.invoke('geo-agent:update-geo-article-draft', articleId, draft, messageId),
-  getConversations: (projectId, limit) => ipcRenderer.invoke('geo-agent:get-conversations', { projectId, limit }),
+  getConversations: (projectId, limit) => ipcRenderer.invoke('geo-agent:get-conversations', { projectId: projectId || null, limit }),
+  getPublicConversations: (limit) => ipcRenderer.invoke('geo-agent:get-public-conversations', { limit }),
   getConversation: (conversationId) => ipcRenderer.invoke('geo-agent:get-conversation', conversationId),
+  touchConversationSummary: (conversationId, reason = 'manual') => ipcRenderer.invoke('geo-agent:touch-conversation-summary', { conversationId, reason }),
   deleteConversation: (conversationId) => ipcRenderer.invoke('geo-agent:delete-conversation', conversationId),
-  clearConversationHistory: () => ipcRenderer.invoke('geo-agent:clear-conversation-history'),
+  clearConversationHistory: (payload) => ipcRenderer.invoke('geo-agent:clear-conversation-history', payload),
   getKnowledgeEntries: (projectId, limit) => ipcRenderer.invoke('geo-agent:get-knowledge-entries', { projectId, limit }),
   createKnowledgeEntry: (entry) => ipcRenderer.invoke('geo-agent:create-knowledge-entry', entry),
   searchKnowledge: (query, projectId, limit) => ipcRenderer.invoke('geo-agent:search-knowledge', { query, projectId, limit }),
@@ -124,7 +134,7 @@ contextBridge.exposeInMainWorld('geoAgent', {
   createKnowledgeAsset: (asset) => ipcRenderer.invoke('geo-agent:create-knowledge-asset', asset),
   createKnowledgeDraft: (draft) => ipcRenderer.invoke('geo-agent:create-knowledge-draft', draft),
   createKnowledgeDraftStream: (draft, onEvent) => invokeStream('geo-agent:create-knowledge-draft-stream', draft, onEvent),
-  confirmKnowledgeDraft: (draftId, profile) => ipcRenderer.invoke('geo-agent:confirm-knowledge-draft', { draftId, profile }),
+  confirmKnowledgeDraft: (draftId, profile, conversationId = null, draft = null) => ipcRenderer.invoke('geo-agent:confirm-knowledge-draft', { draftId, profile, conversationId, draft }),
   rejectKnowledgeDraft: (draftId) => ipcRenderer.invoke('geo-agent:reject-knowledge-draft', draftId),
   reindexKnowledge: (projectId) => ipcRenderer.invoke('geo-agent:reindex-knowledge', projectId),
   getKnowledgeIndexStatus: (projectId) => ipcRenderer.invoke('geo-agent:get-knowledge-index-status', projectId),

@@ -324,6 +324,9 @@ export function KnowledgeBase() {
 
   useEffect(() => {
     refreshProfiles();
+    const handleRefresh = () => refreshProfiles();
+    window.addEventListener('geo-agent-enterprises-refresh', handleRefresh);
+    return () => window.removeEventListener('geo-agent-enterprises-refresh', handleRefresh);
   }, []);
 
   useEffect(() => {

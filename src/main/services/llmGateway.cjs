@@ -67,13 +67,50 @@ function parseJsonContent(content) {
   try {
     return JSON.parse(stripped);
   } catch {
-    const start = stripped.indexOf('{');
-    const end = stripped.lastIndexOf('}');
-    if (start >= 0 && end > start) {
-      return JSON.parse(stripped.slice(start, end + 1));
+    const balanced = firstBalancedJsonObject(stripped);
+    if (balanced) {
+      return JSON.parse(balanced);
     }
-    throw new Error('模型没有返回有效 JSON。');
+    throw new Error('模型返回内容不是合法 JSON，请检查 Responses 输出格式。');
   }
+}
+
+function firstBalancedJsonObject(content) {
+  const text = String(content || '');
+  const start = text.indexOf('{');
+  if (start < 0) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === '{') depth += 1;
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, index + 1);
+    }
+  }
+
+  return null;
 }
 
 function createRequestId(prefix = 'llm') {
@@ -334,16 +371,18 @@ async function chatJson(options) {
   };
 }
 
-function messagesToResponsesInput(messages = []) {
-  return messages.map((message) => ({
-    role: message.role === 'system' ? 'developer' : message.role,
-    content: [
-      {
-        type: 'input_text',
-        text: String(message.content || ''),
-      },
-    ],
-  }));
+function messagesToResponsesInput(messages = [], networkMode = NETWORK_MODES.NONE) {
+  return messages.map((message) => {
+    // 豆包助手 API 只支持 user 和 system 角色，不支持 developer 角色
+    let role = message.role;
+    if (networkMode !== NETWORK_MODES.DOUBAO_ASSISTANT_SEARCH && message.role === 'system') {
+      role = 'developer';
+    }
+    return {
+      role,
+      content: String(message.content || ''),
+    };
+  });
 }
 
 function extractResponseText(result) {
@@ -353,8 +392,13 @@ function extractResponseText(result) {
   const output = Array.isArray(result?.output) ? result.output : [];
   const texts = [];
   output.forEach((item) => {
+    if (typeof item?.content === 'string') {
+      texts.push(item.content);
+      return;
+    }
     const content = Array.isArray(item?.content) ? item.content : [];
     content.forEach((part) => {
+      if (typeof part === 'string') texts.push(part);
       if (typeof part?.text === 'string') texts.push(part.text);
       if (typeof part?.output_text === 'string') texts.push(part.output_text);
     });
@@ -372,13 +416,11 @@ function applyNetworkTool(body, networkMode) {
     body.max_tool_calls = Number(process.env.ARK_WEB_SEARCH_MAX_TOOL_CALLS || 3);
   }
   if (networkMode === NETWORK_MODES.DOUBAO_ASSISTANT_SEARCH) {
+    // 豆包助手 API 单次只能启用一个功能
+    // reasoning_search: 边想边搜，适合需要深度思考 + 联网搜索的场景
     body.tools = [{
       type: 'doubao_app',
       feature: {
-        ai_search: {
-          type: 'enabled',
-          role_description: '你是 GEO 信源研究助手，优先寻找目标 AI 更可能引用的公开平台、网站、文章类型和证据结构。',
-        },
         reasoning_search: {
           type: 'enabled',
         },
@@ -413,21 +455,27 @@ async function responsesCompletion({
   stream = false,
 } = {}) {
   const config = getProviderConfig(provider, model);
-  if (!config.apiKey) throw new Error('未配置豆包 Responses API Key。');
-  if (!config.model) throw new Error('未配置豆包 Responses 模型 ID。');
+  if (!config.apiKey) throw new Error('未配置 Responses API Key。');
+  if (!config.model) throw new Error('未配置 Responses 模型 ID。');
 
   const resolvedNetworkMode = webSearch ? NETWORK_MODES.WEB_SEARCH_PLUGIN : networkMode;
   const body = {
     model: config.model,
-    input: input || messagesToResponsesInput(messages),
-    temperature,
-    max_output_tokens: maxTokens,
+    input: input || messagesToResponsesInput(messages, resolvedNetworkMode),
     stream,
   };
-  applyNetworkTool(body, resolvedNetworkMode);
-  if (deepThinking) {
-    body.reasoning = { effort: process.env.DOUBAO_REASONING_EFFORT || 'high' };
+
+  // 豆包助手 API 不支持 temperature、max_output_tokens、reasoning 等参数
+  // 参考文档：https://www.volcengine.com/docs/82379/1330310
+  if (resolvedNetworkMode !== NETWORK_MODES.DOUBAO_ASSISTANT_SEARCH) {
+    body.temperature = temperature;
+    body.max_output_tokens = maxTokens;
+    if (deepThinking) {
+      body.reasoning = { effort: process.env.DOUBAO_REASONING_EFFORT || 'high' };
+    }
   }
+
+  applyNetworkTool(body, resolvedNetworkMode);
 
   const response = await fetch(`${config.baseUrl}/responses`, {
     method: 'POST',
@@ -437,7 +485,7 @@ async function responsesCompletion({
 
   if (!response.ok) {
     const text = await response.text().catch(() => '');
-    throw new Error(`豆包 Responses API 调用失败：HTTP ${response.status}${text ? ` ${text.slice(0, 300)}` : ''}`);
+    throw new Error(`Responses API 调用失败：HTTP ${response.status}${text ? ` ${text.slice(0, 300)}` : ''}`);
   }
 
   return {
@@ -470,14 +518,31 @@ function parseSseLines(buffer) {
 
 function textDeltaFromEvent(event) {
   return event.delta
+    || event?.item?.text
+    || event?.content?.text
     || event.text
     || event.output_text
-    || event?.response?.output_text
     || '';
+}
+
+/**
+ * 判断事件是否是 "done" 事件（包含完整的累加文本，而不是增量）
+ * 豆包助手 API 会在最后发送 *_done 事件，其中包含完整的累加文本
+ */
+function isAggregatedDoneEvent(event) {
+  const eventType = String(event.type || event.event || '');
+  return /\.done$/i.test(eventType) || /_done$/i.test(eventType);
 }
 
 function isReasoningEvent(event) {
   return /reason/i.test(String(event.type || event.event || ''));
+}
+
+function completedResponseFromEvent(event) {
+  if (event.type === 'response.completed' || event.event === 'response.completed') {
+    return event.response || event.data || null;
+  }
+  return null;
 }
 
 async function responsesStream({
@@ -487,27 +552,48 @@ async function responsesStream({
   maxTokens = 6000,
   provider = 'ark',
   model = null,
+  taskType = 'responses',
   webSearch = false,
   networkMode = NETWORK_MODES.NONE,
   deepThinking = false,
   onEvent = null,
 } = {}) {
   const config = getProviderConfig(provider, model);
-  if (!config.apiKey) throw new Error('未配置豆包 Responses API Key。');
-  if (!config.model) throw new Error('未配置豆包 Responses 模型 ID。');
+  if (!config.apiKey) throw new Error('未配置 Responses API Key。');
+  if (!config.model) throw new Error('未配置 Responses 模型 ID。');
 
   const resolvedNetworkMode = webSearch ? NETWORK_MODES.WEB_SEARCH_PLUGIN : networkMode;
+  const requestId = createRequestId('responses');
+  const startedAt = Date.now();
   const body = {
     model: config.model,
-    input: input || messagesToResponsesInput(messages),
-    temperature,
-    max_output_tokens: maxTokens,
+    input: input || messagesToResponsesInput(messages, resolvedNetworkMode),
     stream: true,
   };
-  applyNetworkTool(body, resolvedNetworkMode);
-  if (deepThinking) {
-    body.reasoning = { effort: process.env.DOUBAO_REASONING_EFFORT || 'high' };
+
+  // 豆包助手 API 不支持 temperature、max_output_tokens、reasoning 等参数
+  // 参考文档：https://www.volcengine.com/docs/82379/1330310
+  if (resolvedNetworkMode !== NETWORK_MODES.DOUBAO_ASSISTANT_SEARCH) {
+    body.temperature = temperature;
+    body.max_output_tokens = maxTokens;
+    if (deepThinking) {
+      body.reasoning = { effort: process.env.DOUBAO_REASONING_EFFORT || 'high' };
+    }
   }
+
+  applyNetworkTool(body, resolvedNetworkMode);
+
+  onEvent?.({
+    type: 'model_start',
+    task_type: taskType,
+    provider: config.provider,
+    model: config.model,
+    api_family: 'responses',
+    request_id: requestId,
+    network_mode: resolvedNetworkMode,
+    message: '正在调用 Responses 模型',
+    can_proceed: false,
+  });
 
   const response = await fetch(`${config.baseUrl}/responses`, {
     method: 'POST',
@@ -515,9 +601,23 @@ async function responsesStream({
     body: JSON.stringify(body),
   });
 
+  onEvent?.({
+    type: 'model_status',
+    task_type: taskType,
+    provider: config.provider,
+    model: config.model,
+    api_family: 'responses',
+    request_id: requestId,
+    network_mode: resolvedNetworkMode,
+    http_status: response.status,
+    latency_ms: Date.now() - startedAt,
+    message: response.ok ? 'Responses 模型已连接' : 'Responses 模型调用失败',
+    can_proceed: false,
+  });
+
   if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    throw new Error(`豆包 Responses API 流式调用失败：HTTP ${response.status}${text ? ` ${text.slice(0, 300)}` : ''}`);
+    const bodyText = await response.text().catch(() => '');
+    throw new Error(`Responses API 流式调用失败：HTTP ${response.status}${bodyText ? ` ${bodyText.slice(0, 300)}` : ''}`);
   }
 
   const decoder = new TextDecoder();
@@ -531,26 +631,74 @@ async function responsesStream({
     const parsed = parseSseLines(buffer);
     buffer = parsed.rest;
     parsed.events.forEach((event) => {
-      if (event.type === 'response.completed' || event.response) {
-        finalResponse = event.response || finalResponse;
+      const completed = completedResponseFromEvent(event);
+      if (completed) {
+        finalResponse = completed;
+        return;
       }
       const delta = String(textDeltaFromEvent(event) || '');
       if (!delta) return;
+
+      // 跳过 *.done 事件，因为它们包含的是完整的累加文本，而不是增量
+      // 否则会导致内容重复（例如豆包助手 API 的 response.doubao_app_call_output_text.done）
+      if (isAggregatedDoneEvent(event)) {
+        return;
+      }
+
       if (isReasoningEvent(event)) {
         reasoningText += delta;
-        onEvent?.({ type: 'reasoning_delta', text: delta, event });
+        onEvent?.({
+          type: 'reasoning_delta',
+          task_type: taskType,
+          provider: config.provider,
+          model: config.model,
+          api_family: 'responses',
+          request_id: requestId,
+          text: delta,
+          event_type: event.type || event.event,
+          can_proceed: false,
+        });
       } else {
         outputText += delta;
-        onEvent?.({ type: 'delta', text: delta, event });
+        onEvent?.({
+          type: 'delta',
+          task_type: taskType,
+          provider: config.provider,
+          model: config.model,
+          api_family: 'responses',
+          request_id: requestId,
+          text: delta,
+          event_type: event.type || event.event,
+          can_proceed: false,
+        });
       }
     });
+  }
+
+  const content = outputText || extractResponseText(finalResponse);
+  onEvent?.({
+    type: 'model_status',
+    task_type: taskType,
+    provider: config.provider,
+    model: config.model,
+    api_family: 'responses',
+    request_id: requestId,
+    network_mode: resolvedNetworkMode,
+    latency_ms: Date.now() - startedAt,
+    message: content ? 'Responses 模型输出已接收，正在解析草稿' : 'Responses 模型没有返回可解析文本',
+    can_proceed: false,
+  });
+
+  if (!content) {
+    throw new Error('知识库抽取模型返回为空，可能是 Responses/Chat Completions 接口类型配置不匹配。');
   }
 
   return {
     provider: config.provider,
     model: config.model,
     network_mode: resolvedNetworkMode,
-    content: outputText || extractResponseText(finalResponse),
+    request_id: requestId,
+    content,
     reasoning_content: reasoningText || null,
     raw: finalResponse,
   };
@@ -559,7 +707,7 @@ async function responsesStream({
 async function responsesJson(options) {
   const completion = await responsesCompletion(options);
   const content = extractResponseText(completion.result);
-  if (!content) throw new Error('豆包 Responses API 没有返回可解析文本。');
+  if (!content) throw new Error('Responses API 没有返回可解析文本。');
   return {
     provider: completion.provider,
     model: completion.model,

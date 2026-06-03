@@ -1,0 +1,17 @@
+{
+  "skill_name": "geo-source-discovery",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "基于成都行乐音改的问题池，发现豆包平台的高权重信源。问题池包含：成都汽车音响改装哪家好、成都汽车音响改装店排行榜等。",
+      "expected_output": "生成信源发现报告，包含 channel_priorities、ai_recommended_sources、content_distribution_strategy",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "我想知道 DeepSeek 在回答汽车音响改装问题时，更喜欢引用哪些网站和平台。",
+      "expected_output": "分析 DeepSeek 的引用偏好，生成针对性的信源优先级",
+      "files": []
+    }
+  ]
+}

@@ -2,9 +2,11 @@ const crypto = require('node:crypto');
 const {
   chatCompletionStream,
   chatJson,
-  getExtractionConfig,
   parseJsonContent,
+  responsesJson,
+  responsesStream,
 } = require('./llmGateway.cjs');
+const { getTaskPolicy } = require('./modelPolicyService.cjs');
 
 const UNKNOWN_COMPANY_NAME = '待确认企业名称';
 
@@ -257,6 +259,31 @@ function normalizeExtractionResult(result = {}, projectId = null) {
   };
 }
 
+function extractionUsesResponses(policy) {
+  return String(policy?.api_family || '').toLowerCase() === 'responses';
+}
+
+async function runExtractionJson({ messages, policy, temperature, maxTokens }) {
+  if (extractionUsesResponses(policy)) {
+    return responsesJson({
+      messages,
+      temperature,
+      maxTokens,
+      provider: policy.provider,
+      model: policy.model,
+      networkMode: policy.network_mode,
+      deepThinking: policy.deep_thinking,
+    });
+  }
+  return chatJson({
+    messages,
+    temperature,
+    maxTokens,
+    provider: policy.provider,
+    model: policy.model,
+  });
+}
+
 async function extractKnowledgeDraft({ documents = [], message = '', projectId = null, retry = true }) {
   const corpus = buildCorpus(documents, message);
   validateCorpus(corpus);
@@ -265,39 +292,40 @@ async function extractKnowledgeDraft({ documents = [], message = '', projectId =
     { role: 'system', content: createSystemPrompt() },
     { role: 'user', content: createUserPrompt(corpus) },
   ];
+  const policy = getTaskPolicy('knowledge_extraction');
 
   try {
-    const completion = await chatJson({
+    const completion = await runExtractionJson({
       messages,
+      policy,
       temperature: 0.1,
       maxTokens: 6000,
-      provider: process.env.GEO_EXTRACTION_PROVIDER || null,
-      model: process.env.GEO_EXTRACTION_MODEL || null,
     });
     return {
       ...normalizeExtractionResult(completion.json, projectId),
       extraction_model: completion.model,
       extraction_provider: completion.provider,
+      extraction_api_family: policy.api_family,
     };
   } catch (error) {
     if (!retry) {
       throw error;
     }
 
-    const completion = await chatJson({
+    const completion = await runExtractionJson({
       messages: [
         ...messages,
-        { role: 'user', content: '上一次输出无法解析。请严格返回一个合法 JSON object，不要包含 Markdown 或解释文字。' },
+        { role: 'user', content: 'Previous output was not parseable. Return one valid JSON object only, with no Markdown, explanation, prefix, or suffix.' },
       ],
+      policy,
       temperature: 0,
       maxTokens: 6000,
-      provider: process.env.GEO_EXTRACTION_PROVIDER || null,
-      model: process.env.GEO_EXTRACTION_MODEL || null,
     });
     return {
       ...normalizeExtractionResult(completion.json, projectId),
       extraction_model: completion.model,
       extraction_provider: completion.provider,
+      extraction_api_family: policy.api_family,
     };
   }
 }
@@ -310,17 +338,28 @@ async function extractKnowledgeDraftStream({ documents = [], message = '', proje
     { role: 'system', content: createSystemPrompt() },
     { role: 'user', content: createUserPrompt(corpus) },
   ];
+  const policy = getTaskPolicy('knowledge_extraction');
 
   const runStream = async (streamMessages, attempt) => {
-    const completion = await chatCompletionStream({
+    const common = {
       messages: streamMessages,
       temperature: attempt > 1 ? 0 : 0.1,
       maxTokens: 6000,
-      provider: process.env.GEO_EXTRACTION_PROVIDER || null,
-      model: process.env.GEO_EXTRACTION_MODEL || null,
-      taskType: 'knowledge_extraction',
+      provider: policy.provider,
+      model: policy.model,
       onEvent,
-    });
+    };
+    const completion = extractionUsesResponses(policy)
+      ? await responsesStream({
+          ...common,
+          taskType: 'knowledge_extraction',
+          networkMode: policy.network_mode,
+          deepThinking: policy.deep_thinking,
+        })
+      : await chatCompletionStream({
+          ...common,
+          taskType: 'knowledge_extraction',
+        });
     return {
       completion,
       json: parseJsonContent(completion.content),
@@ -333,6 +372,7 @@ async function extractKnowledgeDraftStream({ documents = [], message = '', proje
       ...normalizeExtractionResult(json, projectId),
       extraction_model: completion.model,
       extraction_provider: completion.provider,
+      extraction_api_family: policy.api_family,
       extraction_request_id: completion.request_id,
     };
   } catch (error) {
@@ -342,25 +382,27 @@ async function extractKnowledgeDraftStream({ documents = [], message = '', proje
     onEvent?.({
       type: 'model_status',
       task_type: 'knowledge_extraction',
-      message: '模型首次输出无法解析，正在用更严格的 JSON 格式重试',
+      api_family: policy.api_family,
+      message: 'Model output was not parseable. Retrying with stricter JSON instructions.',
       can_proceed: false,
     });
     const { completion, json } = await runStream([
       ...messages,
-      { role: 'user', content: '上一次输出无法解析。请严格返回一个合法 JSON object，不要包含 Markdown、解释文字或多余前后缀。' },
+      { role: 'user', content: 'Previous output was not parseable. Return one valid JSON object only, with no Markdown, explanation, prefix, or suffix.' },
     ], 2);
     return {
       ...normalizeExtractionResult(json, projectId),
       extraction_model: completion.model,
       extraction_provider: completion.provider,
+      extraction_api_family: policy.api_family,
       extraction_request_id: completion.request_id,
     };
   }
 }
 
 function getConfiguredExtractionModelLabel() {
-  const config = getExtractionConfig();
-  return `${config.provider}:${config.model || 'not-configured'}`;
+  const policy = getTaskPolicy('knowledge_extraction');
+  return `${policy.provider}:${policy.model || 'not-configured'}`;
 }
 
 module.exports = {
