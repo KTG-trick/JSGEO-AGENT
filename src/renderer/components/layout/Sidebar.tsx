@@ -34,10 +34,10 @@ const navItems = [
 export function Sidebar({ currentView, onViewChange, isCollapsed, onCollapseToggle }: SidebarProps) {
   return (
     <nav className={cn(
-      "fixed left-0 top-[32px] h-[calc(100%-32px)] w-[240px] z-50 bg-surface-container-low border-r border-outline-variant/60 flex flex-col transition-all duration-300 ease-in-out",
+      "fixed left-0 top-[40px] h-[calc(100%-40px)] w-[240px] z-50 bg-surface-container-low border-r border-outline-variant/60 flex flex-col transition-transform duration-300 ease-in-out",
       isCollapsed ? "-translate-x-full md:pointer-events-none" : "translate-x-0"
     )}>
-      <div className="px-5 h-[64px] flex items-center justify-between shrink-0 border-b border-outline-variant/10">
+      <div className="px-5 h-[64px] flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2">
           <div className="h-7 w-7 rounded-sm bg-primary/10 text-primary flex-shrink-0 flex items-center justify-center">
              <Bot className="w-4 h-4" />

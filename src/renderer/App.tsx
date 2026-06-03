@@ -43,8 +43,8 @@ export default function App() {
 
   return (
     <div className="h-screen w-screen flex flex-col overflow-hidden">
-      <TitleBar />
       <EnterpriseProvider>
+        <TitleBar />
         <Layout currentView={currentView} onViewChange={setCurrentView}>
           {views.map(([view, element]) => (
             <motion.div
