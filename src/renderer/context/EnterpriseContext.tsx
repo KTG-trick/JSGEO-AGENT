@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { Enterprise } from '../data/enterprises';
+import { profileFieldText } from '../lib/profileFields';
 
 interface EnterpriseContextType {
   currentEnterpriseId: string | null;
@@ -31,18 +32,19 @@ const EMPTY_ENTERPRISE: Enterprise = {
 
 function estimateWordCount(profile: GeoAgentEnterpriseProfile) {
   const text = [
-    profile.company_name,
-    profile.short_name,
-    profile.industry,
-    profile.main_business,
-    profile.detailed_intro,
-    profile.brand_story,
-    profile.products_services,
-    profile.product_features,
-    profile.user_pain_points,
-    profile.trust_endorsements,
-    profile.cases,
-    profile.target_keywords,
+    profileFieldText(profile, 'company_name'),
+    profileFieldText(profile, 'short_name'),
+    profileFieldText(profile, 'industry_category'),
+    profileFieldText(profile, 'detailed_address'),
+    profileFieldText(profile, 'business_regions'),
+    profileFieldText(profile, 'offerings'),
+    profileFieldText(profile, 'associated_brands'),
+    profileFieldText(profile, 'target_audiences'),
+    profileFieldText(profile, 'core_advantages'),
+    profileFieldText(profile, 'trust_endorsements'),
+    profileFieldText(profile, 'user_pain_points'),
+    profileFieldText(profile, 'proven_cases'),
+    profileFieldText(profile, 'target_keywords'),
   ].filter(Boolean).join('');
   const count = text.length;
   if (count >= 10000) {
@@ -58,10 +60,10 @@ function profileToEnterprise(profile: GeoAgentEnterpriseProfile): Enterprise {
   const id = profile.project_id || profile.id;
   return {
     id,
-    name: profile.short_name || profile.company_name,
-    industry: profile.industry || profile.main_business || '未填写行业',
-    tag: profile.main_business || profile.industry || '企业知识库',
-    desc: profile.detailed_intro || profile.products_services || profile.main_business || '暂无企业介绍。',
+    name: profileFieldText(profile, 'short_name') || profileFieldText(profile, 'company_name'),
+    industry: profileFieldText(profile, 'industry_category') || '未填写行业',
+    tag: profileFieldText(profile, 'offerings') || profileFieldText(profile, 'industry_category') || '企业知识库',
+    desc: profileFieldText(profile, 'detailed_intro') || profileFieldText(profile, 'offerings') || '暂无企业介绍。',
     sourceCount: profile.entry_count,
     wordCount: estimateWordCount(profile),
     graphEntities: Math.max(0, profile.entry_count),

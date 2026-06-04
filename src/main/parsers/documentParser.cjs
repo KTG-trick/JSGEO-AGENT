@@ -1,8 +1,15 @@
 const crypto = require('node:crypto');
 const mammoth = require('mammoth');
+let pdfParse = null;
+try {
+  pdfParse = require('pdf-parse');
+} catch {
+  pdfParse = null;
+}
 
 const TEXT_EXTENSIONS = new Set(['.txt', '.md', '.markdown', '.csv', '.json', '.html', '.htm']);
 const DOCX_EXTENSIONS = new Set(['.docx']);
+const PDF_EXTENSIONS = new Set(['.pdf']);
 
 function nowIso() {
   return new Date().toISOString();
@@ -66,6 +73,11 @@ function isDocxLike(filename, contentType) {
   const ext = extensionOf(filename);
   return DOCX_EXTENSIONS.has(ext)
     || /officedocument\.wordprocessingml\.document/i.test(String(contentType || ''));
+}
+
+function isPdfLike(filename, contentType) {
+  const ext = extensionOf(filename);
+  return PDF_EXTENSIONS.has(ext) || /pdf/i.test(String(contentType || ''));
 }
 
 function decodeBase64Payload(contentBase64 = '') {
@@ -138,6 +150,18 @@ async function parseAsset(asset = {}) {
     } else if (isDocxLike(filename, contentType)) {
       const result = await mammoth.extractRawText({ buffer });
       text = normalizeText(result.value);
+    } else if (isPdfLike(filename, contentType)) {
+      if (!pdfParse) {
+        return failedParsedAsset({
+          id,
+          filename,
+          contentType,
+          timestamp,
+          message: 'PDF parser dependency is not installed.',
+        });
+      }
+      const result = await pdfParse(buffer);
+      text = normalizeText(result.text);
     } else {
       return failedParsedAsset({
         id,

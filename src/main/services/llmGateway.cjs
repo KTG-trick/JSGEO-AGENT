@@ -625,12 +625,16 @@ async function responsesStream({
   let outputText = '';
   let reasoningText = '';
   let finalResponse = null;
+  const rawEvents = [];
 
   for await (const chunk of response.body) {
     buffer += decoder.decode(chunk, { stream: true });
     const parsed = parseSseLines(buffer);
     buffer = parsed.rest;
     parsed.events.forEach((event) => {
+      if (rawEvents.length < 300) {
+        rawEvents.push(event);
+      }
       const completed = completedResponseFromEvent(event);
       if (completed) {
         finalResponse = completed;
@@ -701,6 +705,7 @@ async function responsesStream({
     content,
     reasoning_content: reasoningText || null,
     raw: finalResponse,
+    raw_events: rawEvents,
   };
 }
 
@@ -717,6 +722,51 @@ async function responsesJson(options) {
   };
 }
 
+async function streamLLM({
+  messages,
+  input = null,
+  temperature = 0.2,
+  maxTokens = 6000,
+  provider = 'ark',
+  model = null,
+  taskType = 'llm_stream',
+  webSearch = false,
+  networkMode = NETWORK_MODES.NONE,
+  deepThinking = false,
+  forceNoResponseFormat = false,
+  apiFamily = null,
+  onEvent = null,
+} = {}) {
+  const resolvedApiFamily = apiFamily || API_FAMILIES.RESPONSES;
+
+  if (resolvedApiFamily === API_FAMILIES.CHAT_COMPLETIONS) {
+    return chatCompletionStream({
+      messages,
+      temperature,
+      maxTokens,
+      provider,
+      model,
+      forceNoResponseFormat,
+      taskType,
+      onEvent,
+    });
+  }
+
+  return responsesStream({
+    messages,
+    input,
+    temperature,
+    maxTokens,
+    provider,
+    model,
+    taskType,
+    webSearch,
+    networkMode,
+    deepThinking,
+    onEvent,
+  });
+}
+
 module.exports = {
   chatCompletion,
   chatCompletionStream,
@@ -726,4 +776,5 @@ module.exports = {
   responsesCompletion,
   responsesJson,
   responsesStream,
+  streamLLM,
 };

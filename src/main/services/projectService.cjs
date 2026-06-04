@@ -1,5 +1,6 @@
 const crypto = require('node:crypto');
 const { getDb } = require('./databaseService.cjs');
+const { fieldText, toEvidenceField } = require('./profileFieldService.cjs');
 
 function nowIso() {
   return new Date().toISOString();
@@ -116,32 +117,17 @@ function countKnowledgeEntries(db, projectId) {
 
 function buildCompatibleProfile(row) {
   const profile = parseJson(row.profile_json, {});
-  const companyName = profile.company_name || row.name;
+  const companyName = fieldText(profile, 'company_name') || row.name;
 
   return {
     id: row.profile_id || row.project_id,
     project_id: row.project_id,
-    company_name: companyName,
-    short_name: profile.short_name || companyName,
-    industry: profile.industry || null,
-    main_business: profile.main_business || row.description || null,
+    ...profile,
+    company_name: profile.company_name || toEvidenceField(companyName),
+    short_name: profile.short_name || toEvidenceField(companyName),
+    detailed_intro: profile.detailed_intro || toEvidenceField(row.description || null),
     official_website: profile.official_website || null,
     official_media: profile.official_media || null,
-    detailed_intro: profile.detailed_intro || row.description || null,
-    brand_story: profile.brand_story || null,
-    products_services: profile.products_services || null,
-    product_features: profile.product_features || null,
-    user_pain_points: profile.user_pain_points || null,
-    trust_endorsements: profile.trust_endorsements || null,
-    brand_authorization_pricing: profile.brand_authorization_pricing || null,
-    cases: profile.cases || null,
-    business_regions: profile.business_regions || null,
-    customer_service_phone: profile.customer_service_phone || null,
-    current_pain_points: profile.current_pain_points || null,
-    core_advantages: profile.core_advantages || null,
-    extra_info: profile.extra_info || null,
-    image_notes: profile.image_notes || null,
-    target_keywords: profile.target_keywords || null,
     generated_long_tail_keywords: profile.generated_long_tail_keywords || null,
     entry_count: row.entry_count || 0,
     created_at: row.profile_created_at || row.created_at,

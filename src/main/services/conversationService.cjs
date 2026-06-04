@@ -2,6 +2,7 @@ const crypto = require('node:crypto');
 const { getDb } = require('./databaseService.cjs');
 const { chatCompletion } = require('./llmGateway.cjs');
 const { getTaskPolicy } = require('./modelPolicyService.cjs');
+const { fieldText } = require('./profileFieldService.cjs');
 
 const SUMMARY_MESSAGE_DELTA = 6;
 
@@ -51,8 +52,8 @@ function isTransientConversationText(value) {
 }
 
 function getCompanyNameFromMetadata(metadata) {
-  return metadata?.profile?.company_name
-    || metadata?.draft?.profile?.company_name
+  return fieldText(metadata?.profile || {}, 'company_name')
+    || fieldText(metadata?.draft?.profile || {}, 'company_name')
     || metadata?.project?.company_name
     || metadata?.question_set?.company_name
     || null;

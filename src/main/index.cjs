@@ -3,7 +3,9 @@ const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
 const {
+  DB_FILENAME,
   closeDatabase,
+  getDatabasePath,
   getDb,
   getDbPath,
   initializeDatabase,
@@ -13,13 +15,48 @@ const conversationService = require('./services/conversationService.cjs');
 const projectService = require('./services/projectService.cjs');
 const sourceDiscoveryService = require('./services/sourceDiscoveryService.cjs');
 const questionPoolService = require('./services/questionPoolService.cjs');
+const articleDraftService = require('./services/articleDraftService.cjs');
+const articlePublishService = require('./services/articlePublishService.cjs');
+const visibilityCheckService = require('./services/visibilityCheckService.cjs');
+const reflectionService = require('./services/reflectionService.cjs');
 const skillService = require('./services/skillService.cjs');
+const { fieldText } = require('./services/profileFieldService.cjs');
 
 const rootDir = path.resolve(__dirname, '..', '..');
 const isDev = !app.isPackaged;
 const devServerUrl = process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:3000';
 
+app.disableHardwareAcceleration();
+app.commandLine.appendSwitch('no-sandbox');
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('disable-gpu-compositing');
+app.commandLine.appendSwitch('disable-gpu-sandbox');
+
 let mainWindow = null;
+let databaseStartupWarning = null;
+
+function canWriteDirectory(dir) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const probe = path.join(dir, `.write-test-${process.pid}-${Date.now()}`);
+    fs.writeFileSync(probe, 'ok');
+    fs.unlinkSync(probe);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function ensureWritableUserDataPath() {
+  const primaryDir = app.getPath('userData');
+  if (canWriteDirectory(primaryDir)) {
+    return;
+  }
+  const fallbackDir = path.join(app.getPath('temp'), 'GEO-Agent Studio', 'user-data');
+  fs.mkdirSync(fallbackDir, { recursive: true });
+  app.setPath('userData', fallbackDir);
+  databaseStartupWarning = `默认用户数据目录不可写，已切换到备用目录：${fallbackDir}`;
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -69,9 +106,9 @@ function loadEnvFile() {
 function emptyIndexStatus(projectId = null) {
   return {
     project_id: projectId,
-    embedding_model: process.env.ARK_EMBEDDING_MODEL || 'not-configured',
-    vector_backend: 'fts',
-    embedding_backend: process.env.ARK_API_KEY ? 'volcengine-ark-pending' : 'disabled',
+    embedding_model: 'not-enabled',
+    vector_backend: 'fts5',
+    embedding_backend: 'disabled',
     pending: 0,
     indexed: 0,
     failed: 0,
@@ -93,11 +130,12 @@ function getKnowledgeSnapshot(projectId) {
 }
 
 function keywordListFromProfile(profile) {
-  if (!profile?.target_keywords) {
+  const keywords = fieldText(profile || {}, 'target_keywords');
+  if (!keywords) {
     return [];
   }
 
-  return String(profile.target_keywords)
+  return String(keywords)
     .split(/[,\n，、]/)
     .map((item) => item.trim())
     .filter(Boolean);
@@ -108,14 +146,14 @@ function createShellGeoProject(projectId) {
   const snapshot = getKnowledgeSnapshot(projectId);
   const profile = snapshot.profile;
   const indexStatus = snapshot.index_status || emptyIndexStatus(projectId);
-  const companyName = profile?.company_name || '待录入企业';
-  const knowledgeReady = Boolean(profile?.company_name && indexStatus.indexed > 0);
+  const companyName = fieldText(profile || {}, 'company_name') || '待录入企业';
+  const knowledgeReady = Boolean(companyName !== '待录入企业' && indexStatus.indexed > 0);
 
   return {
     id: `geo-${projectId || 'shell'}`,
     project_id: projectId || '',
     company_name: companyName,
-    industry: profile?.industry || null,
+    industry: fieldText(profile || {}, 'industry_category') || null,
     region: null,
     current_phase: knowledgeReady ? 'ready_for_check' : 'collecting',
     platforms: ['doubao', 'deepseek'],
@@ -142,38 +180,85 @@ function createShellWorkflowState(geoProjectId) {
   const snapshot = getKnowledgeSnapshot(projectId);
   const profile = snapshot.profile;
   const indexStatus = snapshot.index_status || emptyIndexStatus(projectId);
-  const knowledgeReady = Boolean(profile?.company_name && indexStatus.indexed > 0);
+  const companyName = fieldText(profile || {}, 'company_name') || '待录入企业';
+  const knowledgeReady = Boolean(companyName !== '待录入企业' && indexStatus.indexed > 0);
 
-  const stage = (stageNumber, key, label, description, status = 'not_started') => ({
+  const stage = (stageNumber, key, label, description, status = 'not_started', artifactId = null, artifacts = {}) => ({
     stage: stageNumber,
     key,
     label,
     status,
     description,
-    artifact_id: null,
-    artifacts: {},
+    artifact_id: artifactId,
+    artifacts,
   });
 
-  const platformState = (platform, label) => ({
-    platform,
-    label,
-    stages: {
-      stage_2: stage(
-        2,
-        'stage_2',
-        'AI 问题池',
-        '基于企业知识库生成真实 AI 用户会问的推荐、对比和采购问题。',
-        knowledgeReady ? 'ready' : 'not_started'
-      ),
-      stage_3: stage(3, 'stage_3', '支撑内容策略', '规划被 AI 引用和推荐所需的内容证据。'),
-      stage_4: stage(4, 'stage_4', '支撑内容生成', '生成咨询类、测评类和推荐理由类内容草稿。'),
-    },
-  });
+  const platformState = (platform, label) => {
+    let questionSet = null;
+    let discovery = null;
+    let articleStats = { total: 0, published: 0, reviewed: 0 };
+    let visibilityCheck = null;
+    let pendingRules = 0;
+    try {
+      const db = getDb();
+      questionSet = db.prepare(`
+        SELECT id, status FROM geo_question_sets
+        WHERE project_id = ? AND platform = ?
+        ORDER BY datetime(created_at) DESC LIMIT 1
+      `).get(projectId, platform);
+      discovery = db.prepare(`
+        SELECT id, status FROM geo_source_discoveries
+        WHERE project_id = ? AND platform = ?
+        ORDER BY datetime(created_at) DESC LIMIT 1
+      `).get(projectId, platform);
+      const articleRows = db.prepare(`
+        SELECT status, draft_json FROM geo_article_drafts
+        WHERE project_id = ? AND platform = ?
+      `).all(projectId, platform);
+      articleStats = articleRows.reduce((acc, row) => {
+        acc.total += 1;
+        const parsed = JSON.parse(row.draft_json || '{}');
+        const status = parsed?.publication_evidence?.status || row.status;
+        if (status === 'published') acc.published += 1;
+        if (['reviewed', 'published'].includes(status)) acc.reviewed += 1;
+        return acc;
+      }, { total: 0, published: 0, reviewed: 0 });
+      visibilityCheck = db.prepare(`
+        SELECT id, status FROM ai_visibility_checks
+        WHERE project_id = ? AND platform = ?
+        ORDER BY datetime(created_at) DESC LIMIT 1
+      `).get(projectId, platform);
+      pendingRules = db.prepare(`
+        SELECT COUNT(*) AS count FROM evolution_rules
+        WHERE project_id = ? AND platform = ? AND status = 'pending'
+      `).get(projectId, platform)?.count || 0;
+    } catch {
+      // Keep shell state available before database initialization.
+    }
+    const stage2Status = questionSet ? 'completed' : (knowledgeReady ? 'ready' : 'not_started');
+    const stage3Status = discovery ? 'completed' : (questionSet ? 'ready' : 'not_started');
+    const stage4Status = articleStats.total >= 9 ? 'completed' : (discovery ? 'ready' : 'not_started');
+    const stage5Status = articleStats.published > 0 ? 'completed' : (articleStats.total > 0 ? 'ready' : 'not_started');
+    const stage6Status = visibilityCheck ? 'completed' : (articleStats.published > 0 ? 'ready' : 'not_started');
+    const stage7Status = pendingRules > 0 ? 'pending' : (visibilityCheck ? 'ready' : 'not_started');
+    return {
+      platform,
+      label,
+      stages: {
+        stage_2: stage(2, 'stage_2', 'AI 问题池', '基于企业知识库和目标词生成 10 条核心问题。', stage2Status, questionSet?.id || null),
+        stage_3: stage(3, 'stage_3', '信源发现', '使用豆包助手联网搜索观察真实引用来源。', stage3Status, discovery?.id || null),
+        stage_4: stage(4, 'stage_4', '内容资产生成', '生成首轮支撑文章和排行榜文章草稿。', stage4Status, null, articleStats),
+        stage_5: stage(5, 'stage_5', '稿件管理与发布', '校对稿件、生成 OSS 预览、选择媒体投递并同步订单状态。', stage5Status, null, articleStats),
+        stage_6: stage(6, 'stage_6', 'AI 推荐可见性检测', '有已发布文章 URL 后自动检测核心问题，并每 10 分钟复查。', stage6Status, visibilityCheck?.id || null),
+        stage_7: stage(7, 'stage_7', '反思优化/自动学习', '仅在文章被 AI 推荐或排名上升时生成待确认学习规则。', stage7Status, null, { pending_rules: pendingRules }),
+      },
+    };
+  };
 
   return {
     geo_project_id: geoProjectId,
     enterprise_project_id: projectId,
-    company_name: profile?.company_name || '待录入企业',
+    company_name: companyName,
     current_phase: knowledgeReady ? 'ready_for_check' : 'collecting',
     knowledge_base_ready: knowledgeReady,
     stage_1: stage(
@@ -188,10 +273,6 @@ function createShellWorkflowState(geoProjectId) {
       deepseek: platformState('deepseek', 'DeepSeek'),
     },
   };
-}
-
-function notImplemented(name) {
-  return new Error(`${name} 尚未接入新的 Electron-only 服务层，将在后续阶段实现。`);
 }
 
 function canReachUrl(url, timeoutMs = 1200) {
@@ -234,10 +315,10 @@ function startupFallbackHtml(reason) {
   </head>
   <body>
     <main>
-      <h1>GEO-Agent Studio 未能加载前端页面</h1>
+      <h1>GEO-Agent Studio 鏈兘鍔犺浇鍓嶇椤甸潰</h1>
       <p>${escapeHtml(reason)}</p>
-      <p>开发模式请使用 <code>npm run dev</code> 启动，它会同时启动 Vite 和 Electron。</p>
-      <p>如果只启动了 Electron，请先运行 <code>npm run build</code>，应用会回退加载本地 dist 页面。</p>
+      <p>寮€鍙戞ā寮忚浣跨敤 <code>npm run dev</code> 鍚姩锛屽畠浼氬悓鏃跺惎鍔?Vite 鍜?Electron銆?/p>
+      <p>濡傛灉鍙惎鍔ㄤ簡 Electron锛岃鍏堣繍琛?<code>npm run build</code>锛屽簲鐢ㄤ細鍥為€€鍔犺浇鏈湴 dist 椤甸潰銆?/p>
     </main>
   </body>
 </html>`;
@@ -268,8 +349,12 @@ async function createWindow() {
 
   if (isDev) {
     if (await canReachUrl(devServerUrl)) {
-      await mainWindow.loadURL(devServerUrl);
-      return;
+      try {
+        await mainWindow.loadURL(devServerUrl);
+        return;
+      } catch (error) {
+        console.warn(`[startup] Failed to load ${devServerUrl}; falling back to built dist.`, error);
+      }
     }
 
     const distIndex = path.join(rootDir, 'dist', 'index.html');
@@ -320,13 +405,14 @@ function registerHandlers() {
     service: 'geo-agent-electron-main',
     mode: 'electron-only-local',
     database_path: getDbPath(),
+    database_warning: databaseStartupWarning,
     timestamp: nowIso(),
   });
 
   ipcMain.handle('app:ping', health);
   ipcMain.handle('geo-agent:health-check', health);
 
-  // 窗口控制
+  // 绐楀彛鎺у埗
   ipcMain.handle('geo-agent:window-minimize', () => mainWindow?.minimize());
   ipcMain.handle('geo-agent:window-maximize', () => {
     if (mainWindow?.isMaximized()) {
@@ -374,6 +460,10 @@ function registerHandlers() {
     knowledgeService.createKnowledgeEntry(entry));
   ipcMain.handle('geo-agent:create-knowledge-asset', async (_event, asset) =>
     knowledgeService.createKnowledgeAsset(asset));
+  ipcMain.handle('geo-agent:reparse-knowledge-asset', async (_event, assetId) =>
+    knowledgeService.reparseKnowledgeAsset(assetId));
+  ipcMain.handle('geo-agent:delete-knowledge-asset', async (_event, assetId) =>
+    knowledgeService.deleteKnowledgeAsset(assetId));
   ipcMain.handle('geo-agent:create-knowledge-draft', async (_event, draft) =>
     knowledgeService.createKnowledgeDraft(draft));
   ipcMain.handle('geo-agent:create-knowledge-draft-stream', async (event, request = {}) => {
@@ -385,7 +475,7 @@ function registerHandlers() {
     let draftMessage = null;
     try {
       if (true) {
-        // 尝试复用最近的 geo_workflow 会话，如果都没有则创建新的
+        // 尝试复用最近的 geo_workflow 会话；没有则创建新的会话。
         let effectiveConversationId = payload.conversation_id || null;
         if (!effectiveConversationId) {
           const latest = conversationService.findLatestConversation(null, 'geo_workflow');
@@ -453,8 +543,7 @@ function registerHandlers() {
     const projectId = response.project_id;
     if (projectId) {
       try {
-        // 尝试复用最近的 geo_workflow 会话（包含知识库创建后的后续阶段）
-        // 如果没有，则创建新的 geo_workflow 会话
+        // 灏濊瘯澶嶇敤鏈€杩戠殑 geo_workflow 浼氳瘽锛堝寘鍚煡璇嗗簱鍒涘缓鍚庣殑鍚庣画闃舵锛?        // 濡傛灉娌℃湁锛屽垯鍒涘缓鏂扮殑 geo_workflow 浼氳瘽
         let effectiveConversationId = payload.conversationId || null;
         if (!effectiveConversationId) {
           const latest = conversationService.findLatestConversation(null, 'geo_workflow');
@@ -469,8 +558,8 @@ function registerHandlers() {
           conversation = conversationService.ensureConversation({
           projectId,
           conversationId: effectiveConversationId,
-          title: `${response.profile.company_name || '企业'} GEO 优化`,
-          firstMessage: '开始 GEO 优化流程',
+          title: `${response.profile.company_name || '浼佷笟'} GEO 浼樺寲`,
+          firstMessage: '寮€濮?GEO 浼樺寲娴佺▼',
           kind: 'geo_workflow',
           });
         }
@@ -506,7 +595,7 @@ function registerHandlers() {
           conversationId: conversation.id,
           projectId,
           role: 'assistant',
-          content: `已建立「${response.profile.company_name || '企业'}」企业知识库，并完成本地索引。`,
+          content: `已建立「${fieldText(response.profile || {}, 'company_name') || response.profile.company_name || '企业'}」企业知识库，并完成本地索引。`,
           metadata: {
             type: 'knowledge_confirmed',
             draft_id: payload.draftId || payload.id,
@@ -587,7 +676,7 @@ function registerHandlers() {
 
     return {
       role: 'assistant',
-      content: '新的 Electron-only 服务层正在重建中。阶段 1 已接入本地企业数据库，阶段 2A 已接入本地知识库保存、切片和 FTS 检索。聊天能力将在后续阶段接入。',
+      content: 'Electron-only service layer is being rebuilt. Local enterprise database and knowledge base indexing are available.',
       conversation_id: payload.conversation_id || `shell-${Date.now()}`,
       provider: 'electron-main',
       model: payload.selected_model || 'not-connected',
@@ -630,7 +719,7 @@ function registerHandlers() {
       });
       event.sender.send(channel, {
         type: 'status',
-        message: '正在写入当前企业聊天历史...',
+        message: '姝ｅ湪鍐欏叆褰撳墠浼佷笟鑱婂ぉ鍘嗗彶...',
         conversation_id: conversation.id,
       });
       await emitTextDeltas(event.sender, channel, assistantContent);
@@ -804,7 +893,7 @@ function registerHandlers() {
     const projectId = project.project_id;
     let effectiveConversationId = conversationId;
     if (!effectiveConversationId) {
-      // 只复用同一知识库的 geo_workflow 类型会话
+      // 鍙鐢ㄥ悓涓€鐭ヨ瘑搴撶殑 geo_workflow 绫诲瀷浼氳瘽
       const latest = conversationService.findLatestConversation(projectId, 'geo_workflow');
       if (latest) {
         effectiveConversationId = latest.id;
@@ -814,7 +903,7 @@ function registerHandlers() {
       projectId,
       conversationId: effectiveConversationId,
       title: `${project.company_name || '企业'} GEO 阶段二`,
-      firstMessage: '准备生成 AI 问题池',
+      firstMessage: '准备生成 AI 核心问题池',
       kind: 'geo_workflow',
     });
     const platformLabel = platform === 'deepseek' ? 'DeepSeek' : '豆包';
@@ -822,7 +911,7 @@ function registerHandlers() {
       conversationId: conversation.id,
       projectId,
       role: 'assistant',
-      content: `已准备进入${platformLabel}阶段二：AI 问题池生成。\n\n确认后会基于企业知识库生成${platformLabel}平台的用户真实问题池和高优先级排行榜问题，并保存到独立平台状态，不写入企业知识库事实条目。`,
+      content: `已准备进入${platformLabel}阶段二：AI 核心问题池生成。\n\n确认后会基于企业知识库和 target_keywords 直接生成 10 条核心问题，并自动确认为本轮 GEO 北极星问题。`,
       metadata: {
         type: 'geo_phase_prompt',
         project,
@@ -834,19 +923,19 @@ function registerHandlers() {
     return { conversation_id: conversation.id, message };
   });
 
-  // 阶段二：AI 问题池 - 确认
-  ipcMain.handle('geo-agent:confirm-geo-phase-two', async (_event, geoProjectId, platform = 'doubao', messageId = null) => {
+  // 闃舵浜岋細AI 闂姹?- 纭
+  ipcMain.handle('geo-agent:confirm-geo-phase-two', async (_event, geoProjectId, platform = 'doubao', messageId = null, confirmedQuestionIds = []) => {
     const projectId = projectIdFromGeoProjectId(geoProjectId);
     const questionSet = await questionPoolService.getLatestQuestionSet(projectId, platform);
 
     if (!questionSet) {
-      throw new Error('未找到阶段二问题池，请先生成问题池');
+      throw new Error('未找到阶段二问题池，请先生成问题池。');
     }
 
-    // 确认问题集
-    await questionPoolService.confirmQuestionSet(questionSet.id);
+    // 纭闂闆?
+    // 鏇存柊 conversation 娑堟伅
+    const confirmedQuestionSet = await questionPoolService.confirmQuestionSet(questionSet.id, confirmedQuestionIds);
 
-    // 更新 conversation 消息
     if (messageId) {
       const db = getDb();
       const row = db.prepare('SELECT conversation_id FROM messages WHERE id = ?').get(messageId);
@@ -855,12 +944,12 @@ function registerHandlers() {
           messageId,
           conversationId: row.conversation_id,
           projectId,
-          content: `已确认${platform === 'doubao' ? '豆包' : 'DeepSeek'}阶段二问题池，共 ${questionSet.questions.question_pool?.length || 0} 个问题。`,
+          content: `已确认${platform === 'doubao' ? '豆包' : 'DeepSeek'}阶段二问题池，共 ${questionSet.questions.confirmed_questions?.length || questionSet.questions.question_pool?.length || 0} 个问题。`,
           metadata: {
             type: 'geo_phase_prompt',
             platform,
             phase: 2,
-            question_set: questionSet,
+            question_set: confirmedQuestionSet,
             status: 'completed',
             confirmation_state: 'output-available',
             confirmation_approved: true,
@@ -869,14 +958,17 @@ function registerHandlers() {
       }
     }
 
-    return createShellGeoProject(projectId);
+    return {
+      project: createShellGeoProject(projectId),
+      question_set: confirmedQuestionSet,
+    };
   });
 
-  // 阶段二：AI 问题池 - 取消
+  // 闃舵浜岋細AI 闂姹?- 鍙栨秷
   ipcMain.handle('geo-agent:cancel-geo-phase-two', async (_event, geoProjectId, platform = 'doubao', messageId = null) => {
     const projectId = projectIdFromGeoProjectId(geoProjectId);
 
-    // 更新 conversation 消息
+    // 鏇存柊 conversation 娑堟伅
     if (messageId) {
       const db = getDb();
       const row = db.prepare('SELECT conversation_id FROM messages WHERE id = ?').get(messageId);
@@ -901,9 +993,9 @@ function registerHandlers() {
     return createShellGeoProject(projectId);
   });
 
-  // 阶段二：AI 问题池 - 流式生成
+  // 闃舵浜岋細AI 闂姹?- 娴佸紡鐢熸垚
   ipcMain.handle('geo-agent:run-geo-phase-two-report-stream', async (event, request = {}) => {
-    // 从 request 对象中解析参数（preload.cjs 发送的是 { requestId, payload } 格式）
+    // 从 request 对象中解析参数，preload.cjs 发送的是 { requestId, payload } 格式。
     const requestId = request.requestId;
     const payload = request.payload || request;
     const geoProjectId = payload.geoProjectId;
@@ -911,7 +1003,7 @@ function registerHandlers() {
     const messageId = payload.messageId || null;
     let conversationId = payload.conversationId || null;
 
-    // 使用前端的 requestId 构建 channel，确保事件能被前端正确接收
+    // 使用前端 requestId 构建 channel，确保事件能被前端正确接收。
     const channel = `geo-agent:run-geo-phase-two-report-stream:${requestId}`;
     const projectId = projectIdFromGeoProjectId(geoProjectId);
 
@@ -922,22 +1014,22 @@ function registerHandlers() {
           conversationId = latest.id;
         }
       }
-      // 确保 conversation
+      // 纭繚 conversation
       const conversation = conversationService.ensureConversation({
         projectId,
         conversationId,
-        title: `${platform === 'doubao' ? '豆包' : 'DeepSeek'} 阶段二问题池生成`,
+        title: `${platform === 'doubao' ? '璞嗗寘' : 'DeepSeek'} 闃舵浜岄棶棰樻睜鐢熸垚`,
         kind: 'geo_workflow',
       });
 
-      // 发送 meta 事件
+      // 鍙戦€?meta 浜嬩欢
       event.sender.send(channel, {
         type: 'meta',
         conversation_id: conversation.id,
         message: { id: messageId || `assistant-${Date.now()}`, role: 'assistant', content: '' },
       });
 
-      // 调用流式生成
+      // 璋冪敤娴佸紡鐢熸垚
       const questionSet = await questionPoolService.generateQuestionPoolStream({
         projectId,
         platform,
@@ -947,23 +1039,23 @@ function registerHandlers() {
         },
       });
 
-      // 更新 conversation 消息
+      // 鏇存柊 conversation 娑堟伅
       const resultMessage = conversationService.addMessage({
         conversationId: conversation.id,
         projectId,
         role: 'assistant',
-        content: `已生成${platform === 'doubao' ? '豆包' : 'DeepSeek'}阶段二问题池，共 ${questionSet.questions.question_pool?.length || 0} 个问题。`,
+        content: `已生成${platform === 'doubao' ? '豆包' : 'DeepSeek'}阶段二核心问题池，共 ${questionSet.questions.confirmed_questions?.length || questionSet.questions.question_pool?.length || 0} 条问题。`,
         metadata: {
           type: 'geo_phase_result',
           platform,
           phase: 2,
           question_set: questionSet,
           status: 'completed',
-          confirmation_state: 'approval-requested',
+          confirmation_state: 'output-available',
         },
       });
 
-      // 发送 done 事件
+      // 鍙戦€?done 浜嬩欢
       event.sender.send(channel, {
         type: 'done',
         content: questionSet.questions.summary,
@@ -973,7 +1065,7 @@ function registerHandlers() {
 
       return { type: 'done', question_set: questionSet, message: resultMessage };
     } catch (error) {
-      console.error('[geo-phase-two] 流式调用失败:', error.message);
+      console.error('[geo-phase-two] 娴佸紡璋冪敤澶辫触:', error.message);
       event.sender.send(channel, { type: 'error', error: error.message });
       return { type: 'error', error: error.message };
     }
@@ -991,12 +1083,12 @@ function registerHandlers() {
     return questionPoolService.getLatestQuestionSet(projectId, platform);
   });
 
-  // 阶段二：获取报告
+  // 闃舵浜岋細鑾峰彇鎶ュ憡
   ipcMain.handle('geo-agent:get-geo-report', async (_event, reportId) => {
     return questionPoolService.getQuestionSet(reportId);
   });
 
-  // 阶段二：获取最新问题集
+  // 闃舵浜岋細鑾峰彇鏈€鏂伴棶棰橀泦
   ipcMain.handle('geo-agent:get-latest-geo-question-set', async (_event, geoProjectId, platform) => {
     const projectId = projectIdFromGeoProjectId(geoProjectId);
     return questionPoolService.getLatestQuestionSet(projectId, platform);
@@ -1007,28 +1099,289 @@ function registerHandlers() {
     return questionPoolService.getQuestionSet(questionSetId);
   });
 
-  const pendingApis = [
-    'geo-agent:run-geo-article-draft',
-    'geo-agent:run-geo-support-articles',
-    'geo-agent:run-geo-support-articles-stream',
-    'geo-agent:get-latest-geo-article-draft',
-    'geo-agent:get-geo-article-draft',
-    'geo-agent:confirm-geo-article-draft',
-    'geo-agent:update-geo-article-draft',
-  ];
-
-  pendingApis.forEach((channel) => {
-    ipcMain.handle(channel, async () => {
-      throw notImplemented(channel);
+  ipcMain.handle('geo-agent:run-geo-article-draft', async (_event, geoProjectId, platform = 'doubao', articleType = 'consulting', options = {}) => {
+    return articleDraftService.generateArticleDraft({
+      geoProjectId,
+      platform,
+      articleType,
+      onEvent: typeof options?.onEvent === 'function' ? options.onEvent : null,
     });
+  });
+
+  ipcMain.handle('geo-agent:run-geo-support-articles', async (_event, geoProjectId, platform = 'doubao') => {
+    return articleDraftService.generateSupportArticles({ geoProjectId, platform });
+  });
+
+  ipcMain.handle('geo-agent:run-geo-support-articles-stream', async (event, request = {}) => {
+    const requestId = request.requestId;
+    const payload = request.payload || request;
+    const options = payload.options || {};
+    const channel = `geo-agent:run-geo-support-articles-stream:${requestId}`;
+    const projectId = projectIdFromGeoProjectId(payload.geoProjectId || payload.geo_project_id);
+    let conversation = null;
+    let stageMessage = null;
+    try {
+      if (projectId) {
+        let effectiveConversationId = options.conversationId || options.conversation_id || null;
+        if (!effectiveConversationId) {
+          const latest = conversationService.findLatestConversation(projectId, 'geo_workflow');
+          if (latest) {
+            effectiveConversationId = latest.id;
+          }
+        }
+        conversation = conversationService.ensureConversation({
+          projectId,
+          conversationId: effectiveConversationId,
+          title: `${payload.platform || 'GEO'} 阶段四内容资产`,
+          firstMessage: '生成阶段四内容资产',
+          kind: 'geo_workflow',
+        });
+        if (!options.messageId) {
+          stageMessage = conversationService.addMessage({
+            conversationId: conversation.id,
+            projectId,
+            role: 'assistant',
+            content: `正在生成 ${payload.platform || 'GEO'} 阶段四内容资产。`,
+            metadata: {
+              type: 'geo_phase_prompt',
+              status: 'streaming',
+              phase: 4,
+              platform: payload.platform || 'doubao',
+              parent_message_id: options.parentMessageId || null,
+            },
+          });
+          event.sender.send(channel, {
+            type: 'meta',
+            platform: payload.platform,
+            phase: 4,
+            conversation_id: conversation.id,
+            message: stageMessage,
+          });
+        }
+      }
+      const result = await articleDraftService.generateSupportArticlesStream(
+        {
+          geoProjectId: payload.geoProjectId,
+          platform: payload.platform || 'doubao',
+        },
+        (streamEvent) => {
+          event.sender.send(channel, streamEvent);
+        },
+      );
+      if (conversation && projectId) {
+        const messageContent = result.status === 'completed'
+          ? `已完成${payload.platform === 'deepseek' ? 'DeepSeek' : '豆包'}阶段四内容资产。`
+          : `阶段四内容资产部分生成失败：${result.error_message || '请查看失败项并重试。'}`;
+        const metadata = {
+          type: 'geo_phase_result',
+          status: result.status || 'completed',
+          phase: 4,
+          platform: result.platform || payload.platform || 'doubao',
+          support_articles: result,
+          artifact_id: result.run_id || null,
+          parent_message_id: options.parentMessageId || null,
+          confirmation_state: 'output-available',
+          confirmation_approved: true,
+        };
+        stageMessage = stageMessage
+          ? conversationService.updateConversationMessage({
+            messageId: stageMessage.id,
+            conversationId: conversation.id,
+            projectId,
+            content: messageContent,
+            metadata,
+          })
+          : conversationService.addMessage({
+            conversationId: conversation.id,
+            projectId,
+            role: 'assistant',
+            content: messageContent,
+            metadata,
+          });
+      }
+      event.sender.send(channel, {
+        type: 'done',
+        status: 'completed',
+        conversation_id: conversation?.id,
+        message: stageMessage,
+        support_articles: result,
+      });
+      return { type: 'done', conversation_id: conversation?.id, message: stageMessage, support_articles: result };
+    } catch (error) {
+      console.error('[geo-article-draft] 流式生成失败:', error.message);
+      if (conversation && projectId) {
+        try {
+          conversationService.addMessage({
+            conversationId: conversation.id,
+            projectId,
+            role: 'assistant',
+            content: error.message || String(error),
+            metadata: {
+              type: 'geo_phase_result',
+              status: 'error',
+              phase: 4,
+              platform: payload.platform || 'doubao',
+              error: error.message || String(error),
+            },
+          });
+        } catch (archiveError) {
+          console.warn('[conversation] failed to archive support articles error', archiveError);
+        }
+      }
+      event.sender.send(channel, { type: 'error', error: error.message, conversation_id: conversation?.id });
+      return { type: 'error', error: error.message, conversation_id: conversation?.id };
+    }
+  });
+
+  ipcMain.handle('geo-agent:get-latest-geo-article-draft', async (_event, geoProjectId, platform = 'doubao', articleType = null) => {
+    return articleDraftService.getLatestArticleDraft(geoProjectId, platform, articleType);
+  });
+
+  ipcMain.handle('geo-agent:get-geo-article-draft', async (_event, articleId) => {
+    return articleDraftService.getArticleDraft(articleId);
+  });
+
+  ipcMain.handle('geo-agent:confirm-geo-article-draft', async (_event, articleId) => {
+    return articleDraftService.confirmArticleDraft(articleId);
+  });
+
+  ipcMain.handle('geo-agent:update-geo-article-draft', async (_event, articleId, draft) => {
+    return articleDraftService.updateArticleDraft(articleId, draft);
+  });
+
+  ipcMain.handle('geo-agent:list-article-drafts', async (_event, projectId, filters = {}) => {
+    return articlePublishService.listArticleDrafts(projectId, filters);
+  });
+
+  ipcMain.handle('geo-agent:update-article-draft', async (_event, articleId, patch = {}) => {
+    return articlePublishService.updateArticleDraft(articleId, patch);
+  });
+
+  ipcMain.handle('geo-agent:mark-article-reviewed', async (_event, articleId) => {
+    return articlePublishService.markArticleReviewed(articleId);
+  });
+
+  ipcMain.handle('geo-agent:prepare-article-preview', async (_event, articleId) => {
+    return articlePublishService.prepareArticlePreview(articleId);
+  });
+
+  ipcMain.handle('geo-agent:sync-chaojimeijie-resources', async (_event, resourceType = 'media', page = 1, size = 200) => {
+    return articlePublishService.syncChaojimeijieResources(resourceType, page, size);
+  });
+
+  ipcMain.handle('geo-agent:list-publish-resources', async (_event, filters = {}) => {
+    return articlePublishService.listPublishResources(filters);
+  });
+
+  ipcMain.handle('geo-agent:recommend-publish-resources', async (_event, articleId, options = {}) => {
+    return articlePublishService.recommendPublishResources(articleId, options);
+  });
+
+  ipcMain.handle('geo-agent:publish-article', async (_event, articleId, adapterId = 'external_api_pending', options = {}) => {
+    return articlePublishService.publishArticle(articleId, adapterId, options);
+  });
+
+  ipcMain.handle('geo-agent:sync-publish-order', async (_event, articleId) => {
+    return articlePublishService.syncPublishOrder(articleId);
+  });
+
+  ipcMain.handle('geo-agent:sync-publish-orders', async (_event, projectId) => {
+    return articlePublishService.syncPublishOrders(projectId);
+  });
+
+  ipcMain.handle('geo-agent:manage-publish-order', async (_event, articleId, action, payload = {}) => {
+    return articlePublishService.managePublishOrder(articleId, action, payload);
+  });
+
+  ipcMain.handle('geo-agent:record-published-url', async (_event, articleId, payload = {}) => {
+    return articlePublishService.recordPublishedUrl(articleId, payload);
+  });
+
+  ipcMain.handle('geo-agent:run-visibility-check-stream', async (event, request = {}) => {
+    const requestId = request.requestId;
+    const payload = request.payload || request;
+    const channel = `geo-agent:run-visibility-check-stream:${requestId}`;
+    try {
+      const check = await visibilityCheckService.runVisibilityCheckStream(payload, (streamEvent) => {
+        event.sender.send(channel, streamEvent);
+      });
+      event.sender.send(channel, { type: 'done', status: check.status, visibility_check: check });
+      return { type: 'done', visibility_check: check };
+    } catch (error) {
+      const message = error.message || String(error);
+      console.error('[visibility-check] 运行失败:', message);
+      event.sender.send(channel, { type: 'error', error: message });
+      return { type: 'error', error: message };
+    }
+  });
+
+  ipcMain.handle('geo-agent:get-latest-visibility-check', async (_event, geoProjectId, platform = 'doubao') => {
+    return visibilityCheckService.getLatestVisibilityCheck(geoProjectId, platform);
+  });
+
+  ipcMain.handle('geo-agent:generate-reflection', async (_event, geoProjectId, platform = 'doubao', visibilityCheckId = null) => {
+    return reflectionService.generateReflection(geoProjectId, platform, visibilityCheckId);
+  });
+
+  ipcMain.handle('geo-agent:confirm-evolution-rule', async (_event, ruleId) => {
+    return reflectionService.confirmEvolutionRule(ruleId);
+  });
+
+  ipcMain.handle('geo-agent:reject-evolution-rule', async (_event, ruleId) => {
+    return reflectionService.rejectEvolutionRule(ruleId);
+  });
+
+  ipcMain.handle('geo-agent:list-evolution-rules', async (_event, projectId, filters = {}) => {
+    return reflectionService.listEvolutionRules(projectId, filters);
   });
 }
 
+function shouldUseDatabaseFallback(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return message.includes('readonly database')
+    || message.includes('read-only')
+    || message.includes('eacces')
+    || message.includes('eperm');
+}
+
+function copyDatabaseIfPossible(sourceDir, targetDir) {
+  fs.mkdirSync(targetDir, { recursive: true });
+  [DB_FILENAME, `${DB_FILENAME}-wal`, `${DB_FILENAME}-shm`].forEach((filename) => {
+    const source = path.join(sourceDir, filename);
+    const target = path.join(targetDir, filename);
+    if (fs.existsSync(source) && !fs.existsSync(target)) {
+      fs.copyFileSync(source, target);
+    }
+  });
+}
+
+function initializeDatabaseForCurrentUser() {
+  const primaryDir = app.getPath('userData');
+  try {
+    initializeDatabase(primaryDir);
+    return;
+  } catch (error) {
+    if (!shouldUseDatabaseFallback(error)) {
+      throw error;
+    }
+    const fallbackDir = path.join(app.getPath('temp'), 'GEO-Agent Studio', 'runtime-db');
+    try {
+      copyDatabaseIfPossible(primaryDir, fallbackDir);
+    } catch (copyError) {
+      databaseStartupWarning = `原数据库无法写入，且复制到备用目录失败：${copyError instanceof Error ? copyError.message : String(copyError)}`;
+    }
+    initializeDatabase(fallbackDir);
+    databaseStartupWarning = databaseStartupWarning
+      || `原数据库只读，已切换到可写备用库：${getDatabasePath(fallbackDir)}`;
+  }
+}
+
+ensureWritableUserDataPath();
 loadEnvFile();
 registerHandlers();
 
 app.whenReady().then(async () => {
-  initializeDatabase(app.getPath('userData'));
+  initializeDatabaseForCurrentUser();
   await createWindow();
 });
 

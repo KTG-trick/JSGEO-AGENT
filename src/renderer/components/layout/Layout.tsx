@@ -3,6 +3,7 @@ import { Sidebar } from './Sidebar';
 import { Header } from './Header';
 import { LayoutProps } from '../../types';
 import { cn } from '../../lib/utils';
+import { Menu } from 'lucide-react';
 
 export function Layout({ currentView, onViewChange, children }: LayoutProps) {
   const [isCollapsed, setIsCollapsed] = useState(false);
@@ -44,11 +45,22 @@ export function Layout({ currentView, onViewChange, children }: LayoutProps) {
         onCollapseToggle={() => setIsCollapsed(!isCollapsed)}
       />
 
+      {isCollapsed && (
+        <button
+          aria-label="展开侧边栏"
+          className="fixed left-4 top-[48px] z-[60] inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-on-surface-variant transition-colors hover:bg-surface-container-low hover:text-primary"
+          onClick={() => setIsCollapsed(false)}
+          title="展开侧边栏"
+          type="button"
+        >
+          <Menu className="h-4 w-4" />
+        </button>
+      )}
+
       <div className="flex-1 flex flex-col relative w-full overflow-hidden">
         <Header
           currentView={currentView}
           isSidebarCollapsed={isCollapsed}
-          onToggleSidebar={() => setIsCollapsed(!isCollapsed)}
         />
 
         <main className={cn(

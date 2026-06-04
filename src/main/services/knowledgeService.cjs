@@ -1,61 +1,50 @@
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 const { normalizeText, parseAssets } = require('../parsers/documentParser.cjs');
-const { getDb } = require('./databaseService.cjs');
+const { getDb, getDbPath } = require('./databaseService.cjs');
+const { embedTexts, embeddingConfig, isEmbeddingEnabled } = require('./embeddingService.cjs');
 const { extractKnowledgeDraft, extractKnowledgeDraftStream } = require('./knowledgeExtractionService.cjs');
+const {
+  compactEvidenceProfile,
+  fieldText,
+  fieldValue,
+  normalizeText: normalizeProfileText,
+  toEvidenceField,
+} = require('./profileFieldService.cjs');
 const projectService = require('./projectService.cjs');
+const {
+  PROFILE_FIELD_DEFINITIONS,
+  PROFILE_FIELD_KEYS,
+  REQUIRED_PROFILE_FIELDS,
+} = require('../../shared/profileSchema.cjs');
 
 const PROFILE_ENTRY_TYPE = 'enterprise_profile';
 const ASSET_ENTRY_TYPE = 'asset';
+const ASSET_DIRNAME = 'knowledge-assets';
+const VECTOR_TABLE_NAME = 'knowledge_chunk_vectors';
 const UNKNOWN_COMPANY_NAME = '待确认企业名称';
 
-const PROFILE_FIELDS = [
-  ['company_name', '企业名称'],
-  ['short_name', '企业简称'],
-  ['industry', '行业'],
-  ['main_business', '主营业务'],
-  ['official_website', '官网'],
-  ['official_media', '官方媒体'],
-  ['detailed_intro', '详细介绍'],
-  ['brand_story', '品牌故事'],
-  ['products_services', '产品服务'],
-  ['product_features', '产品特点'],
-  ['user_pain_points', '用户痛点'],
-  ['trust_endorsements', '信任背书'],
-  ['brand_authorization_pricing', '授权与价格'],
-  ['cases', '案例'],
-  ['business_regions', '服务区域'],
-  ['customer_service_phone', '客服电话'],
-  ['current_pain_points', '当前痛点'],
-  ['core_advantages', '核心优势'],
-  ['extra_info', '补充信息'],
-  ['image_notes', '图片资料说明'],
-  ['target_keywords', '目标关键词'],
-];
+let vectorLoadState = null;
 
-const REQUIRED_FIELDS = [
-  ['company_name', '企业名称'],
-  ['main_business', '主营业务'],
-  ['products_services', '产品服务'],
-  ['user_pain_points', '用户痛点'],
-  ['core_advantages', '核心优势'],
-  ['trust_endorsements', '信任背书'],
-  ['cases', '案例'],
-  ['target_keywords', '目标关键词'],
-];
+const PROFILE_FIELDS = PROFILE_FIELD_DEFINITIONS.map((field) => [field.key, field.label]);
+const REQUIRED_FIELDS = REQUIRED_PROFILE_FIELDS;
 
 const FACT_PATTERNS = [
   { field: 'company_name', label: '企业名称', pattern: /(?:公司名称|企业名称|品牌名称|名称)[:：]\s*([^\n，。；;]{2,80})/i, confidence: 0.9 },
   { field: 'short_name', label: '企业简称', pattern: /(?:公司简称|企业简称|简称)[:：]\s*([^\n，。；;]{2,60})/i, confidence: 0.82 },
-  { field: 'industry', label: '行业', pattern: /(?:所属行业|行业|领域)[:：]\s*([^\n。；;]{2,120})/i, confidence: 0.78 },
-  { field: 'main_business', label: '主营业务', pattern: /(?:主营业务|业务范围|核心业务)[:：]\s*([^\n]{4,500})/i, confidence: 0.84 },
-  { field: 'products_services', label: '产品服务', pattern: /(?:产品服务|产品与服务|服务内容|解决方案)[:：]\s*([^\n]{4,700})/i, confidence: 0.8 },
-  { field: 'product_features', label: '产品特点', pattern: /(?:产品特点|功能特点|服务特点|特点)[:：]\s*([^\n]{4,700})/i, confidence: 0.72 },
+  { field: 'industry_category', label: '所属行业分类', pattern: /(?:所属行业|行业|领域)[:：]\s*([^\n。；;]{2,120})/i, confidence: 0.78 },
+  { field: 'offerings', label: '产品与服务项目', pattern: /(?:主营业务|业务范围|核心业务|产品服务|产品与服务|服务内容|解决方案)[:：]\s*([^\n]{4,700})/i, confidence: 0.82 },
+  { field: 'detailed_address', label: '详细经营地址', pattern: /(?:详细地址|经营地址|门店地址|地址)[:：]\s*([^\n]{4,300})/i, confidence: 0.86 },
+  { field: 'associated_brands', label: '关联与代理品牌', pattern: /(?:代理品牌|授权品牌|合作品牌|关联品牌)[:：]\s*([^\n]{2,500})/i, confidence: 0.78 },
+  { field: 'target_audiences', label: '目标客群', pattern: /(?:目标客群|适用车型|服务车主|目标用户)[:：]\s*([^\n]{2,500})/i, confidence: 0.74 },
   { field: 'user_pain_points', label: '用户痛点', pattern: /(?:用户痛点|客户痛点|解决痛点|痛点)[:：]\s*([^\n]{4,700})/i, confidence: 0.72 },
   { field: 'trust_endorsements', label: '信任背书', pattern: /(?:信任背书|资质|认证|荣誉|授权|合作伙伴)[:：]\s*([^\n]{4,700})/i, confidence: 0.72 },
-  { field: 'cases', label: '案例', pattern: /(?:客户案例|成功案例|案例)[:：]\s*([^\n]{4,700})/i, confidence: 0.74 },
+  { field: 'proven_cases', label: '客户案例', pattern: /(?:客户案例|成功案例|案例)[:：]\s*([^\n]{4,700})/i, confidence: 0.74 },
   { field: 'business_regions', label: '服务区域', pattern: /(?:服务区域|覆盖区域|业务区域|地区)[:：]\s*([^\n]{2,300})/i, confidence: 0.7 },
   { field: 'core_advantages', label: '核心优势', pattern: /(?:核心优势|竞争优势|优势)[:：]\s*([^\n]{4,700})/i, confidence: 0.74 },
   { field: 'target_keywords', label: '目标关键词', pattern: /(?:目标关键词|关键词|核心关键词)[:：]\s*([^\n]{2,300})/i, confidence: 0.7 },
+  { field: 'contact_info', label: '联系方式', pattern: /(?:联系电话|联系方式|客服热线|电话|微信)[:：]\s*([^\n]{2,120})/i, confidence: 0.8 },
 ];
 
 function nowIso() {
@@ -75,6 +64,58 @@ function parseJson(value, fallback) {
   }
 }
 
+function safeFilename(filename = '') {
+  return normalizeText(filename)
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+    .replace(/\s+/g, ' ')
+    .slice(0, 180)
+    || 'untitled.txt';
+}
+
+function decodeAssetBuffer(asset = {}) {
+  const rawBase64 = String(asset.content_base64 || '').replace(/^data:[^,]+,/, '');
+  return Buffer.from(rawBase64, 'base64');
+}
+
+function dataRootDir() {
+  const dbPath = getDbPath();
+  if (!dbPath) throw new Error('Database has not been initialized.');
+  return path.dirname(dbPath);
+}
+
+function assetAbsolutePath(storagePath = '') {
+  return path.join(dataRootDir(), storagePath);
+}
+
+function saveOriginalAssetFile({ projectId, assetId, filename, buffer }) {
+  const safeName = safeFilename(filename);
+  const relativeDir = path.join(ASSET_DIRNAME, projectId, assetId);
+  const absoluteDir = path.join(dataRootDir(), relativeDir);
+  fs.mkdirSync(absoluteDir, { recursive: true });
+  const relativePath = path.join(relativeDir, safeName);
+  fs.writeFileSync(path.join(dataRootDir(), relativePath), buffer);
+  return relativePath;
+}
+
+function rowToAsset(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    project_id: row.project_id,
+    filename: row.original_filename,
+    content_type: row.mime_type || null,
+    file_path: row.storage_path,
+    source_type: ASSET_ENTRY_TYPE,
+    status: row.parse_status,
+    embedding_status: row.embedding_status,
+    file_size: row.file_size || 0,
+    sha256: row.sha256,
+    error_message: row.error_message || null,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
 function compactObject(value) {
   return Object.fromEntries(
     Object.entries(value || {}).filter(([, entryValue]) => entryValue !== undefined && entryValue !== null && String(entryValue).trim() !== '')
@@ -82,11 +123,11 @@ function compactObject(value) {
 }
 
 function profileCompanyName(profile = {}) {
-  return normalizeText(profile.company_name || profile.short_name || UNKNOWN_COMPANY_NAME);
+  return normalizeProfileText(fieldText(profile, 'company_name') || fieldText(profile, 'short_name') || UNKNOWN_COMPANY_NAME);
 }
 
 function profileDescription(profile = {}) {
-  return normalizeText(profile.main_business || profile.detailed_intro || profile.products_services || profile.core_advantages || '');
+  return normalizeProfileText(fieldText(profile, 'offerings') || fieldText(profile, 'detailed_intro') || fieldText(profile, 'core_advantages') || '');
 }
 
 function projectExists(projectId) {
@@ -95,55 +136,31 @@ function projectExists(projectId) {
 }
 
 function normalizeProfile(profile = {}) {
-  const normalized = compactObject({
-    id: profile.id,
-    project_id: profile.project_id,
-    company_name: profileCompanyName(profile),
-    short_name: profile.short_name,
-    industry: profile.industry,
-    main_business: profile.main_business,
-    official_website: profile.official_website,
-    official_media: profile.official_media,
-    detailed_intro: profile.detailed_intro,
-    brand_story: profile.brand_story,
-    products_services: profile.products_services,
-    product_features: profile.product_features,
-    user_pain_points: profile.user_pain_points,
-    trust_endorsements: profile.trust_endorsements,
-    brand_authorization_pricing: profile.brand_authorization_pricing,
-    cases: profile.cases,
-    business_regions: profile.business_regions,
-    customer_service_phone: profile.customer_service_phone,
-    current_pain_points: profile.current_pain_points,
-    core_advantages: profile.core_advantages,
-    extra_info: profile.extra_info,
-    image_notes: profile.image_notes,
-    target_keywords: profile.target_keywords,
-    generated_long_tail_keywords: profile.generated_long_tail_keywords,
-  });
-  normalized.company_name = profileCompanyName(normalized);
+  const normalized = compactEvidenceProfile(profile, PROFILE_FIELD_KEYS);
+  normalized.id = profile.id;
+  normalized.project_id = profile.project_id;
+  normalized.company_name = toEvidenceField(profile.company_name || profileCompanyName(profile));
   return normalized;
 }
 
 function buildProfileContent(profile = {}) {
   return PROFILE_FIELDS
-    .filter(([field]) => normalizeText(profile[field]))
-    .map(([field, label]) => `## ${label}\n${normalizeText(profile[field])}`)
+    .filter(([field]) => fieldText(profile, field))
+    .map(([field, label]) => `## ${label}\n${fieldText(profile, field)}`)
     .join('\n\n');
 }
 
 function rowToProfile(row) {
   if (!row) return null;
   const profile = normalizeProfile(parseJson(row.profile_json, {}));
-  const companyName = profile.company_name || row.name;
+  const companyName = profileCompanyName(profile) || row.name;
   return {
     ...profile,
     id: row.project_id,
     project_id: row.project_id,
-    company_name: companyName,
-    short_name: profile.short_name || companyName,
-    main_business: profile.main_business || row.description || null,
-    detailed_intro: profile.detailed_intro || row.description || null,
+    company_name: toEvidenceField(companyName),
+    short_name: profile.short_name || toEvidenceField(companyName),
+    detailed_intro: profile.detailed_intro || toEvidenceField(row.description || null),
     entry_count: row.entry_count || 0,
     created_at: row.profile_created_at || row.created_at,
     updated_at: row.profile_updated_at || row.updated_at,
@@ -151,6 +168,7 @@ function rowToProfile(row) {
 }
 
 function rowToEntry(row) {
+  const metadata = parseJson(row.metadata_json, {});
   return {
     id: row.id,
     project_id: row.project_id,
@@ -158,23 +176,147 @@ function rowToEntry(row) {
     title: row.title || '知识片段',
     content: row.content || '',
     source_type: row.type || row.source_type || 'manual',
-    metadata: parseJson(row.metadata_json, {}),
-    chunk_index: Number(row.chunk_index || 0),
+    metadata,
+    chunk_index: Number(row.chunk_index ?? metadata.chunk_index ?? 0),
     embedding_status: row.embedding_status || 'indexed',
     error_message: row.error_message || null,
+    retrieval_source: row.retrieval_source || metadata.retrieval_source || null,
+    score: row.score === undefined || row.score === null ? null : Number(row.score),
+    matched_chunk: row.matched_chunk || row.content || '',
+    asset_id: row.asset_id || metadata.asset_id || null,
+    source_filename: row.source_filename || metadata.filename || null,
     created_at: row.created_at,
     updated_at: row.updated_at || row.created_at,
   };
 }
 
+function serializeFloat32(values = []) {
+  return Buffer.from(new Float32Array(values.map((value) => Number(value) || 0)).buffer);
+}
+
+function ensureVectorTable(db) {
+  if (vectorLoadState?.checked) return vectorLoadState.ready;
+
+  const config = embeddingConfig();
+  if (!config.dimensions) {
+    vectorLoadState = { checked: true, ready: false, error: 'missing dimensions' };
+    return false;
+  }
+
+  try {
+    const sqliteVec = require('sqlite-vec');
+    sqliteVec.load(db);
+    db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS ${VECTOR_TABLE_NAME} USING vec0(chunk_id TEXT PRIMARY KEY, embedding float[${config.dimensions}])`);
+    vectorLoadState = { checked: true, ready: true, error: null };
+    return true;
+  } catch (error) {
+    vectorLoadState = { checked: true, ready: false, error: error instanceof Error ? error.message : String(error) };
+    return false;
+  }
+}
+
+function cosineSimilarity(a = [], b = []) {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  const length = Math.min(a.length, b.length);
+  for (let index = 0; index < length; index += 1) {
+    const left = Number(a[index]) || 0;
+    const right = Number(b[index]) || 0;
+    dot += left * right;
+    normA += left * left;
+    normB += right * right;
+  }
+  if (!normA || !normB) return 0;
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+function cleanKnowledgeText(content) {
+  const seen = new Set();
+  const lines = normalizeText(content)
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => !/^\s*(第\s*)?\d+\s*(页|\/\s*\d+)?\s*$/.test(line));
+
+  return lines
+    .filter((line) => {
+      const key = line.trim();
+      if (!key) return true;
+      if (key.length > 12) return true;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function splitTextIntoChunks(content, maxLength = 900, overlap = 120) {
+  const text = cleanKnowledgeText(content);
+  if (!text) return [];
+
+  const paragraphs = text.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
+  const chunks = [];
+  let current = '';
+  let currentStart = 0;
+  let cursor = 0;
+  let sectionTitle = '';
+
+  const pushChunk = (chunkContent, start) => {
+    const cleanContent = chunkContent.trim();
+    if (!cleanContent) return;
+    chunks.push({
+      content: cleanContent,
+      chunk_index: chunks.length,
+      section_title: sectionTitle || null,
+      source_range: { start, end: start + cleanContent.length },
+    });
+  };
+
+  paragraphs.forEach((paragraph) => {
+    const paragraphStart = text.indexOf(paragraph, cursor);
+    cursor = paragraphStart >= 0 ? paragraphStart + paragraph.length : cursor;
+    if (/^(#{1,6}\s+|[一二三四五六七八九十0-9]+[、.．]\s*)/.test(paragraph) && paragraph.length <= 80) {
+      sectionTitle = paragraph.replace(/^#{1,6}\s+/, '');
+    }
+
+    if ((current + '\n\n' + paragraph).trim().length <= maxLength) {
+      if (!current) currentStart = Math.max(0, paragraphStart);
+      current = (current ? `${current}\n\n${paragraph}` : paragraph).trim();
+      return;
+    }
+
+    if (current) pushChunk(current, currentStart);
+    if (paragraph.length <= maxLength) {
+      current = paragraph;
+      currentStart = Math.max(0, paragraphStart);
+      return;
+    }
+
+    for (let index = 0; index < paragraph.length; index += maxLength - overlap) {
+      pushChunk(paragraph.slice(index, index + maxLength), Math.max(0, paragraphStart + index));
+    }
+    current = '';
+  });
+
+  if (current) pushChunk(current, currentStart);
+  return chunks;
+}
+
 function getIndexStatus(projectId = null) {
   const db = getDb();
+  const config = embeddingConfig();
+  const embeddingsEnabled = isEmbeddingEnabled();
+  const vectorReady = ensureVectorTable(db);
   if (!projectId) {
     return {
       project_id: null,
-      embedding_model: process.env.ARK_EMBEDDING_MODEL || 'not-configured',
-      vector_backend: 'fts',
-      embedding_backend: process.env.ARK_API_KEY ? 'volcengine-ark-pending' : 'disabled',
+      embedding_model: config.model || 'not-enabled',
+      vector_backend: vectorReady ? 'fts5+sqlite-vec' : 'fts5',
+      embedding_backend: embeddingsEnabled ? 'ark' : 'disabled',
       pending: 0,
       indexed: 0,
       failed: 0,
@@ -184,17 +326,26 @@ function getIndexStatus(projectId = null) {
   }
 
   const chunkCount = db.prepare('SELECT COUNT(*) AS count FROM knowledge_chunks WHERE project_id = ?').get(projectId).count;
-  const entryCount = db.prepare('SELECT COUNT(*) AS count FROM knowledge_entries WHERE project_id = ?').get(projectId).count;
+  const embeddedCount = db.prepare('SELECT COUNT(*) AS count FROM knowledge_chunk_embeddings WHERE project_id = ?').get(projectId).count;
+  const failedAssets = db.prepare("SELECT COUNT(*) AS count FROM knowledge_assets WHERE project_id = ? AND parse_status = 'failed'").get(projectId).count;
+  const assetCount = db.prepare('SELECT COUNT(*) AS count FROM knowledge_assets WHERE project_id = ?').get(projectId).count;
+  const assetRows = db.prepare(`
+    SELECT *
+    FROM knowledge_assets
+    WHERE project_id = ?
+    ORDER BY datetime(created_at) DESC
+    LIMIT 20
+  `).all(projectId);
   return {
     project_id: projectId,
-    embedding_model: process.env.ARK_EMBEDDING_MODEL || 'not-configured',
-    vector_backend: 'fts',
-    embedding_backend: process.env.ARK_API_KEY ? 'volcengine-ark-pending' : 'disabled',
-    pending: 0,
-    indexed: chunkCount,
-    failed: 0,
-    asset_count: entryCount,
-    assets: [],
+    embedding_model: config.model || 'not-enabled',
+    vector_backend: vectorReady ? 'fts5+sqlite-vec' : 'fts5',
+    embedding_backend: embeddingsEnabled ? 'ark' : 'disabled',
+    pending: embeddingsEnabled ? Math.max(0, chunkCount - embeddedCount) : 0,
+    indexed: embeddingsEnabled ? embeddedCount : chunkCount,
+    failed: failedAssets,
+    asset_count: assetCount,
+    assets: assetRows.map(rowToAsset),
   };
 }
 
@@ -233,32 +384,6 @@ function updateProjectSummary(projectId, profile) {
   });
 }
 
-function splitTextIntoChunks(content, maxLength = 900, overlap = 120) {
-  const text = normalizeText(content);
-  if (!text) return [];
-
-  const paragraphs = text.split(/\n{2,}/).map((part) => part.trim()).filter(Boolean);
-  const chunks = [];
-  let current = '';
-  paragraphs.forEach((paragraph) => {
-    if ((current + '\n\n' + paragraph).trim().length <= maxLength) {
-      current = (current ? `${current}\n\n${paragraph}` : paragraph).trim();
-      return;
-    }
-    if (current) chunks.push(current);
-    if (paragraph.length <= maxLength) {
-      current = paragraph;
-      return;
-    }
-    for (let index = 0; index < paragraph.length; index += maxLength - overlap) {
-      chunks.push(paragraph.slice(index, index + maxLength).trim());
-    }
-    current = '';
-  });
-  if (current) chunks.push(current);
-  return chunks;
-}
-
 function contentHash(projectId, entryId, chunkContent, chunkIndex) {
   return crypto.createHash('sha256')
     .update(`${projectId}:${entryId}:${chunkIndex}:${chunkContent}`)
@@ -270,13 +395,20 @@ function deleteFtsRowsForEntries(db, projectId, type = null) {
     ? db.prepare('SELECT kc.id FROM knowledge_chunks kc JOIN knowledge_entries ke ON ke.id = kc.entry_id WHERE kc.project_id = ? AND ke.type = ?').all(projectId, type)
     : db.prepare('SELECT id FROM knowledge_chunks WHERE project_id = ?').all(projectId);
   const deleteFts = db.prepare('DELETE FROM knowledge_chunks_fts WHERE id = ?');
+  const deleteEmbedding = db.prepare('DELETE FROM knowledge_chunk_embeddings WHERE chunk_id = ?');
+  const hasVectorTable = ensureVectorTable(db);
+  const deleteVector = hasVectorTable ? db.prepare(`DELETE FROM ${VECTOR_TABLE_NAME} WHERE chunk_id = ?`) : null;
   rows.forEach((row) => deleteFts.run(row.id));
+  rows.forEach((row) => {
+    deleteEmbedding.run(row.id);
+    deleteVector?.run(row.id);
+  });
 }
 
 function insertEntryWithChunks(db, { projectId, type, title, content, metadata = {} }) {
   const timestamp = nowIso();
   const entryId = crypto.randomUUID();
-  const cleanContent = normalizeText(content);
+  const cleanContent = cleanKnowledgeText(content);
   if (!cleanContent) throw new Error('知识条目内容不能为空。');
 
   db.prepare(`
@@ -302,24 +434,86 @@ function insertEntryWithChunks(db, { projectId, type, title, content, metadata =
     VALUES (@id, @project_id, @title, @content)
   `);
 
-  splitTextIntoChunks(cleanContent).forEach((chunkContent, chunkIndex) => {
+  const insertedChunks = [];
+  splitTextIntoChunks(cleanContent).forEach((chunk) => {
     const chunkId = crypto.randomUUID();
+    const chunkContent = chunk.content;
     const result = insertChunk.run({
       id: chunkId,
       project_id: projectId,
       entry_id: entryId,
       title,
       content: chunkContent,
-      content_hash: contentHash(projectId, entryId, chunkContent, chunkIndex),
-      metadata_json: jsonString({ ...metadata, chunk_index: chunkIndex }),
+      content_hash: contentHash(projectId, entryId, chunkContent, chunk.chunk_index),
+      metadata_json: jsonString({
+        ...metadata,
+        chunk_index: chunk.chunk_index,
+        section_title: chunk.section_title,
+        source_range: chunk.source_range,
+      }),
       created_at: timestamp,
     });
     if (result.changes > 0) {
       insertFts.run({ id: chunkId, project_id: projectId, title, content: chunkContent });
+      insertedChunks.push({ id: chunkId, project_id: projectId, content: chunkContent });
     }
   });
 
-  return entryId;
+  return { entryId, chunks: insertedChunks };
+}
+
+async function embedChunks(projectId, chunks = []) {
+  if (!isEmbeddingEnabled() || !chunks.length) return;
+
+  const db = getDb();
+  const config = embeddingConfig();
+  const embeddings = await embedTexts(chunks.map((chunk) => chunk.content));
+  const timestamp = nowIso();
+  const insertEmbedding = db.prepare(`
+    INSERT INTO knowledge_chunk_embeddings (chunk_id, project_id, embedding_json, embedding_model, dimensions, created_at)
+    VALUES (@chunk_id, @project_id, @embedding_json, @embedding_model, @dimensions, @created_at)
+    ON CONFLICT(chunk_id) DO UPDATE SET
+      embedding_json = excluded.embedding_json,
+      embedding_model = excluded.embedding_model,
+      dimensions = excluded.dimensions,
+      created_at = excluded.created_at
+  `);
+  const hasVectorTable = ensureVectorTable(db);
+  const deleteVector = hasVectorTable ? db.prepare(`DELETE FROM ${VECTOR_TABLE_NAME} WHERE chunk_id = ?`) : null;
+  const insertVector = hasVectorTable
+    ? db.prepare(`INSERT INTO ${VECTOR_TABLE_NAME}(chunk_id, embedding) VALUES (?, ?)`)
+    : null;
+
+  db.transaction(() => {
+    chunks.forEach((chunk, index) => {
+      const embedding = embeddings[index];
+      if (!Array.isArray(embedding)) return;
+      insertEmbedding.run({
+        chunk_id: chunk.id,
+        project_id: projectId,
+        embedding_json: jsonString(embedding),
+        embedding_model: config.model,
+        dimensions: embedding.length,
+        created_at: timestamp,
+      });
+      deleteVector?.run(chunk.id);
+      insertVector?.run(chunk.id, serializeFloat32(embedding));
+    });
+  })();
+}
+
+async function embedPendingChunks(projectId) {
+  if (!isEmbeddingEnabled()) return;
+  const db = getDb();
+  const rows = db.prepare(`
+    SELECT kc.id, kc.project_id, kc.content
+    FROM knowledge_chunks kc
+    LEFT JOIN knowledge_chunk_embeddings kce ON kce.chunk_id = kc.id
+    WHERE kc.project_id = ? AND kce.chunk_id IS NULL
+    ORDER BY datetime(kc.created_at) ASC
+    LIMIT 200
+  `).all(projectId);
+  await embedChunks(projectId, rows);
 }
 
 function listEntries(projectId, limit = 100) {
@@ -535,7 +729,11 @@ function buildProfileFromFacts(facts = [], documents = [], message = '', project
   const profile = {};
   facts.forEach((fact) => {
     if (!profile[fact.field] || fact.confidence > 0.8) {
-      profile[fact.field] = fact.value;
+      profile[fact.field] = {
+        value: fact.value,
+        source_quote: fact.quote || null,
+        confidence: fact.confidence,
+      };
     }
   });
   const corpus = [message, ...documents.map((document) => document.text)].filter(Boolean).join('\n\n');
@@ -544,24 +742,23 @@ function buildProfileFromFacts(facts = [], documents = [], message = '', project
   return normalizeProfile({
     project_id: projectId,
     company_name: profile.company_name || UNKNOWN_COMPANY_NAME,
-    short_name: profile.short_name || (profile.company_name && profile.company_name !== UNKNOWN_COMPANY_NAME ? profile.company_name : null),
+    short_name: profile.short_name || null,
     official_website: profile.official_website || websiteMatch?.[0] || null,
-    main_business: profile.main_business || firstParagraph.slice(0, 300) || null,
-    detailed_intro: firstParagraph ? normalizeText(corpus).slice(0, 3000) : null,
+    detailed_intro: firstParagraph ? toEvidenceField(normalizeText(corpus).slice(0, 3000)) : null,
     ...profile,
   });
 }
 
 function missingFieldsForProfile(profile = {}) {
   return REQUIRED_FIELDS
-    .filter(([field]) => !normalizeText(profile[field]) || profile[field] === UNKNOWN_COMPANY_NAME)
+    .filter(([field]) => !fieldText(profile, field) || fieldText(profile, field) === UNKNOWN_COMPANY_NAME)
     .map(([, label]) => label);
 }
 
 function buildFieldReviews(profile = {}, facts = []) {
   return REQUIRED_FIELDS.map(([field, label]) => {
     const relatedFacts = facts.filter((fact) => fact.field === field);
-    const value = normalizeText(profile[field]);
+    const value = fieldText(profile, field);
     return {
       field,
       label,
@@ -734,39 +931,244 @@ async function createKnowledgeAsset(asset = {}) {
   if (!projectId) throw new Error('project_id is required.');
   projectService.getProject(projectId);
 
+  const db = getDb();
+  const assetId = crypto.randomUUID();
+  const timestamp = nowIso();
+  const filename = safeFilename(asset.filename || 'untitled.txt');
+  const buffer = decodeAssetBuffer(asset);
+  const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+  const storagePath = saveOriginalAssetFile({ projectId, assetId, filename, buffer });
+
+  db.prepare(`
+    INSERT INTO knowledge_assets (
+      id, project_id, original_filename, storage_path, mime_type, file_size,
+      sha256, parse_status, embedding_status, error_message, created_at, updated_at
+    )
+    VALUES (
+      @id, @project_id, @original_filename, @storage_path, @mime_type, @file_size,
+      @sha256, 'pending', 'pending', NULL, @created_at, @updated_at
+    )
+  `).run({
+    id: assetId,
+    project_id: projectId,
+    original_filename: filename,
+    storage_path: storagePath,
+    mime_type: asset.content_type || null,
+    file_size: buffer.length,
+    sha256,
+    created_at: timestamp,
+    updated_at: timestamp,
+  });
+
   const [parsed] = await parseAssets([asset]);
   if (!parsed || parsed.asset.status === 'failed') {
+    const errorMessage = parsed?.asset?.error_message || 'Document parse failed.';
+    db.prepare(`
+      UPDATE knowledge_assets
+      SET parse_status = 'failed',
+          embedding_status = 'failed',
+          error_message = @error_message,
+          updated_at = @updated_at
+      WHERE id = @id
+    `).run({ id: assetId, error_message: errorMessage, updated_at: nowIso() });
+    const assetRow = db.prepare('SELECT * FROM knowledge_assets WHERE id = ?').get(assetId);
     return {
-      asset: {
-        ...(parsed?.asset || {}),
-        id: crypto.randomUUID(),
-        project_id: projectId,
-        source_type: ASSET_ENTRY_TYPE,
-      },
+      asset: rowToAsset(assetRow),
       ...listEntries(projectId),
     };
   }
 
-  const db = getDb();
+  let inserted = { entryId: null, chunks: [] };
   db.transaction(() => {
-    insertEntryWithChunks(db, {
+    inserted = insertEntryWithChunks(db, {
       projectId,
       type: ASSET_ENTRY_TYPE,
       title: parsed.asset.filename,
       content: parsed.document.text,
-      metadata: { source: 'upload', filename: parsed.asset.filename, content_type: parsed.asset.content_type },
+      metadata: {
+        asset_id: assetId,
+        content_type: parsed.asset.content_type,
+        filename: parsed.asset.filename,
+        sha256,
+        source: 'upload',
+      },
+    });
+    db.prepare(`
+      UPDATE knowledge_assets
+      SET entry_id = @entry_id,
+          parse_status = 'parsed',
+          embedding_status = @embedding_status,
+          error_message = NULL,
+          updated_at = @updated_at
+      WHERE id = @id
+    `).run({
+      id: assetId,
+      entry_id: inserted.entryId,
+      embedding_status: isEmbeddingEnabled() ? 'pending' : 'not-configured',
+      updated_at: nowIso(),
     });
   })();
 
+  if (isEmbeddingEnabled()) {
+    try {
+      await embedChunks(projectId, inserted.chunks);
+      db.prepare(`
+        UPDATE knowledge_assets
+        SET embedding_status = 'indexed',
+            updated_at = ?
+        WHERE id = ?
+      `).run(nowIso(), assetId);
+    } catch (error) {
+      db.prepare(`
+        UPDATE knowledge_assets
+        SET embedding_status = 'failed',
+            error_message = @error_message,
+            updated_at = @updated_at
+        WHERE id = @id
+      `).run({
+        id: assetId,
+        error_message: error instanceof Error ? error.message : String(error),
+        updated_at: nowIso(),
+      });
+    }
+  }
+
+  const assetRow = db.prepare('SELECT * FROM knowledge_assets WHERE id = ?').get(assetId);
   return {
-    asset: {
-      ...parsed.asset,
-      id: crypto.randomUUID(),
-      project_id: projectId,
-      source_type: ASSET_ENTRY_TYPE,
-    },
+    asset: rowToAsset(assetRow),
     ...listEntries(projectId),
   };
+}
+
+function getAssetRow(assetId) {
+  const row = getDb().prepare('SELECT * FROM knowledge_assets WHERE id = ?').get(assetId);
+  if (!row) throw new Error('Knowledge asset does not exist.');
+  return row;
+}
+
+function deleteEntryIndexRows(db, entryId) {
+  const chunks = db.prepare('SELECT id FROM knowledge_chunks WHERE entry_id = ?').all(entryId);
+  const deleteFts = db.prepare('DELETE FROM knowledge_chunks_fts WHERE id = ?');
+  const deleteEmbedding = db.prepare('DELETE FROM knowledge_chunk_embeddings WHERE chunk_id = ?');
+  const hasVectorTable = ensureVectorTable(db);
+  const deleteVector = hasVectorTable ? db.prepare(`DELETE FROM ${VECTOR_TABLE_NAME} WHERE chunk_id = ?`) : null;
+  chunks.forEach((chunk) => {
+    deleteFts.run(chunk.id);
+    deleteEmbedding.run(chunk.id);
+    deleteVector?.run(chunk.id);
+  });
+}
+
+async function reparseKnowledgeAsset(assetId) {
+  if (!assetId) throw new Error('assetId is required.');
+  const row = getAssetRow(assetId);
+  projectService.getProject(row.project_id);
+  const buffer = fs.readFileSync(assetAbsolutePath(row.storage_path));
+  const [parsed] = await parseAssets([{
+    filename: row.original_filename,
+    content_type: row.mime_type,
+    content_base64: buffer.toString('base64'),
+  }]);
+
+  const db = getDb();
+  if (!parsed || parsed.asset.status === 'failed') {
+    db.prepare(`
+      UPDATE knowledge_assets
+      SET parse_status = 'failed',
+          embedding_status = 'failed',
+          error_message = @error_message,
+          updated_at = @updated_at
+      WHERE id = @id
+    `).run({
+      id: assetId,
+      error_message: parsed?.asset?.error_message || 'Document parse failed.',
+      updated_at: nowIso(),
+    });
+    return getIndexStatus(row.project_id);
+  }
+
+  let inserted = { entryId: null, chunks: [] };
+  db.transaction(() => {
+    if (row.entry_id) {
+      deleteEntryIndexRows(db, row.entry_id);
+      db.prepare('DELETE FROM knowledge_entries WHERE id = ?').run(row.entry_id);
+    }
+    inserted = insertEntryWithChunks(db, {
+      projectId: row.project_id,
+      type: ASSET_ENTRY_TYPE,
+      title: parsed.asset.filename,
+      content: parsed.document.text,
+      metadata: {
+        asset_id: assetId,
+        content_type: parsed.asset.content_type,
+        filename: parsed.asset.filename,
+        sha256: row.sha256,
+        source: 'upload',
+      },
+    });
+    db.prepare(`
+      UPDATE knowledge_assets
+      SET entry_id = @entry_id,
+          parse_status = 'parsed',
+          embedding_status = @embedding_status,
+          error_message = NULL,
+          updated_at = @updated_at
+      WHERE id = @id
+    `).run({
+      id: assetId,
+      entry_id: inserted.entryId,
+      embedding_status: isEmbeddingEnabled() ? 'pending' : 'not-configured',
+      updated_at: nowIso(),
+    });
+  })();
+
+  if (isEmbeddingEnabled()) {
+    try {
+      await embedChunks(row.project_id, inserted.chunks);
+      db.prepare("UPDATE knowledge_assets SET embedding_status = 'indexed', updated_at = ? WHERE id = ?").run(nowIso(), assetId);
+    } catch (error) {
+      db.prepare(`
+        UPDATE knowledge_assets
+        SET embedding_status = 'failed',
+            error_message = @error_message,
+            updated_at = @updated_at
+        WHERE id = @id
+      `).run({
+        id: assetId,
+        error_message: error instanceof Error ? error.message : String(error),
+        updated_at: nowIso(),
+      });
+    }
+  }
+
+  return getIndexStatus(row.project_id);
+}
+
+function deleteKnowledgeAsset(assetId) {
+  if (!assetId) throw new Error('assetId is required.');
+  const row = getAssetRow(assetId);
+  projectService.getProject(row.project_id);
+  const absolutePath = assetAbsolutePath(row.storage_path);
+  const db = getDb();
+  db.transaction(() => {
+    if (row.entry_id) {
+      deleteEntryIndexRows(db, row.entry_id);
+      db.prepare('DELETE FROM knowledge_entries WHERE id = ?').run(row.entry_id);
+    }
+    db.prepare('DELETE FROM knowledge_assets WHERE id = ?').run(assetId);
+  })();
+
+  try {
+    if (fs.existsSync(absolutePath)) fs.unlinkSync(absolutePath);
+    const parentDir = path.dirname(absolutePath);
+    if (parentDir.startsWith(path.join(dataRootDir(), ASSET_DIRNAME))) {
+      fs.rmSync(parentDir, { recursive: true, force: true });
+    }
+  } catch {
+    // Deleting the database record is the source of truth; file cleanup can be retried by reindexing later.
+  }
+
+  return getIndexStatus(row.project_id);
 }
 
 function makeFtsQuery(query) {
@@ -778,7 +1180,98 @@ function makeFtsQuery(query) {
     .join(' OR ');
 }
 
-function searchKnowledge(payload = {}) {
+function rowsByChunkIds(db, projectId, ids = []) {
+  if (!ids.length) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  const rows = db.prepare(`
+    SELECT kc.id, kc.project_id, kc.entry_id, 'chunk' AS type, kc.title, kc.content,
+           kc.metadata_json, json_extract(kc.metadata_json, '$.chunk_index') AS chunk_index,
+           CASE WHEN kce.chunk_id IS NULL THEN 'pending' ELSE 'indexed' END AS embedding_status,
+           NULL AS error_message, kc.created_at, kc.created_at AS updated_at
+    FROM knowledge_chunks kc
+    LEFT JOIN knowledge_chunk_embeddings kce ON kce.chunk_id = kc.id
+    WHERE kc.project_id = ? AND kc.id IN (${placeholders})
+  `).all(projectId, ...ids);
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  return ids.map((id) => byId.get(id)).filter(Boolean);
+}
+
+async function vectorSearchRows(db, projectId, query, limit) {
+  if (!isEmbeddingEnabled()) return [];
+
+  let queryEmbedding;
+  try {
+    [queryEmbedding] = await embedTexts([query]);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(queryEmbedding)) return [];
+
+  if (ensureVectorTable(db)) {
+    try {
+      const matches = db.prepare(`
+        SELECT chunk_id, distance
+        FROM ${VECTOR_TABLE_NAME}
+        WHERE embedding MATCH ? AND k = ?
+      `).all(serializeFloat32(queryEmbedding), limit);
+      const distances = new Map(matches.map((match) => [match.chunk_id, Number(match.distance || 0)]));
+      return rowsByChunkIds(db, projectId, matches.map((match) => match.chunk_id))
+        .map((row) => ({
+          ...row,
+          retrieval_source: 'vector',
+          score: Number((1 / (1 + (distances.get(row.id) || 0))).toFixed(4)),
+        }));
+    } catch {
+      // fall through to JSON cosine fallback
+    }
+  }
+
+  const rows = db.prepare(`
+    SELECT kc.id, kc.project_id, kc.entry_id, 'chunk' AS type, kc.title, kc.content,
+           kc.metadata_json, json_extract(kc.metadata_json, '$.chunk_index') AS chunk_index,
+           'indexed' AS embedding_status, NULL AS error_message,
+           kc.created_at, kc.created_at AS updated_at, kce.embedding_json
+    FROM knowledge_chunk_embeddings kce
+    JOIN knowledge_chunks kc ON kc.id = kce.chunk_id
+    WHERE kce.project_id = ?
+    LIMIT 500
+  `).all(projectId);
+
+  return rows
+    .map((row) => {
+      const embedding = parseJson(row.embedding_json, []);
+      return {
+        ...row,
+        retrieval_source: 'vector',
+        score: Number(cosineSimilarity(queryEmbedding, embedding).toFixed(4)),
+      };
+    })
+    .filter((row) => row.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+}
+
+function mergeSearchRows(rows = [], limit = 10) {
+  const byId = new Map();
+  rows.forEach((row) => {
+    const existing = byId.get(row.id);
+    if (!existing) {
+      byId.set(row.id, row);
+      return;
+    }
+    const score = Math.max(Number(existing.score || 0), Number(row.score || 0));
+    byId.set(row.id, {
+      ...existing,
+      retrieval_source: existing.retrieval_source === row.retrieval_source ? existing.retrieval_source : 'hybrid',
+      score,
+    });
+  });
+  return Array.from(byId.values())
+    .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
+    .slice(0, limit);
+}
+
+async function searchKnowledge(payload = {}) {
   const projectId = normalizeText(payload.projectId || payload.project_id);
   const query = normalizeText(payload.query);
   const limit = Number(payload.limit || 10);
@@ -791,10 +1284,13 @@ function searchKnowledge(payload = {}) {
   if (ftsQuery) {
     rows = db.prepare(`
       SELECT kc.id, kc.project_id, kc.entry_id, 'chunk' AS type, kc.title, kc.content,
-             kc.metadata_json, 0 AS chunk_index, 'indexed' AS embedding_status,
-             NULL AS error_message, kc.created_at, kc.created_at AS updated_at
+             kc.metadata_json, json_extract(kc.metadata_json, '$.chunk_index') AS chunk_index,
+             CASE WHEN kce.chunk_id IS NULL THEN 'pending' ELSE 'indexed' END AS embedding_status,
+             NULL AS error_message, kc.created_at, kc.created_at AS updated_at,
+             'fts' AS retrieval_source, 0.65 AS score
       FROM knowledge_chunks_fts fts
       JOIN knowledge_chunks kc ON kc.id = fts.id
+      LEFT JOIN knowledge_chunk_embeddings kce ON kce.chunk_id = kc.id
       WHERE fts.project_id = ? AND knowledge_chunks_fts MATCH ?
       LIMIT ?
     `).all(projectId, ftsQuery, limit);
@@ -803,42 +1299,54 @@ function searchKnowledge(payload = {}) {
   if (!rows.length) {
     rows = db.prepare(`
       SELECT kc.id, kc.project_id, kc.entry_id, 'chunk' AS type, kc.title, kc.content,
-             kc.metadata_json, 0 AS chunk_index, 'indexed' AS embedding_status,
-             NULL AS error_message, kc.created_at, kc.created_at AS updated_at
+             kc.metadata_json, json_extract(kc.metadata_json, '$.chunk_index') AS chunk_index,
+             CASE WHEN kce.chunk_id IS NULL THEN 'pending' ELSE 'indexed' END AS embedding_status,
+             NULL AS error_message, kc.created_at, kc.created_at AS updated_at,
+             'like' AS retrieval_source, 0.45 AS score
       FROM knowledge_chunks kc
+      LEFT JOIN knowledge_chunk_embeddings kce ON kce.chunk_id = kc.id
       WHERE kc.project_id = @projectId
         AND (kc.content LIKE @likeQuery OR kc.title LIKE @likeQuery)
       ORDER BY datetime(kc.created_at) DESC
       LIMIT @limit
     `).all({ projectId, likeQuery: `%${query}%`, limit });
   }
-  return { entries: rows.map(rowToEntry), total: rows.length };
+
+  const vectorRows = await vectorSearchRows(db, projectId, query, limit);
+  const mergedRows = mergeSearchRows([...rows, ...vectorRows], limit);
+  return { entries: mergedRows.map(rowToEntry), total: mergedRows.length };
 }
 
-function reindexKnowledge(projectId) {
+async function reindexKnowledge(projectId) {
   if (!projectId) throw new Error('projectId is required.');
   projectService.getProject(projectId);
   const db = getDb();
   db.transaction(() => {
     db.prepare('DELETE FROM knowledge_chunks_fts WHERE project_id = ?').run(projectId);
+    db.prepare('DELETE FROM knowledge_chunk_embeddings WHERE project_id = ?').run(projectId);
+    if (ensureVectorTable(db)) {
+      db.prepare(`DELETE FROM ${VECTOR_TABLE_NAME} WHERE chunk_id IN (SELECT id FROM knowledge_chunks WHERE project_id = ?)`).run(projectId);
+    }
     const rows = db.prepare('SELECT id, project_id, title, content FROM knowledge_chunks WHERE project_id = ?').all(projectId);
     const insertFts = db.prepare('INSERT INTO knowledge_chunks_fts (id, project_id, title, content) VALUES (?, ?, ?, ?)');
     rows.forEach((row) => insertFts.run(row.id, row.project_id, row.title || '', row.content));
   })();
+  await embedPendingChunks(projectId);
   return getIndexStatus(projectId);
 }
 
 function hasMeaningfulDraftProfile(profile = {}) {
   return [
-    profile.company_name,
-    profile.main_business,
-    profile.products_services,
-    profile.core_advantages,
-    profile.trust_endorsements,
-    profile.cases,
-    profile.target_keywords,
-  ].some((value) => {
-    const textValue = normalizeText(value);
+    'company_name',
+    'offerings',
+    'detailed_address',
+    'business_regions',
+    'core_advantages',
+    'trust_endorsements',
+    'proven_cases',
+    'target_keywords',
+  ].some((field) => {
+    const textValue = fieldText(profile, field);
     return textValue && textValue !== UNKNOWN_COMPANY_NAME;
   });
 }
@@ -1071,9 +1579,11 @@ module.exports = {
   createKnowledgeAsset,
   createKnowledgeDraft: createKnowledgeDraftStrict,
   createKnowledgeEntry,
+  deleteKnowledgeAsset,
   getKnowledgeEntries: listEntries,
   getKnowledgeIndexStatus: getIndexStatus,
   getKnowledgeProfile,
+  reparseKnowledgeAsset,
   reindexKnowledge,
   rejectKnowledgeDraft,
   saveEnterpriseProfile,

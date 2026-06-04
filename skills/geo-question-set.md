@@ -1,214 +1,240 @@
 ---
 name: geo-question-set
-description: 基于企业知识库生成 AI 问题池，用于后续推荐可见性检测。当用户需要生成问题池、AI 问题、推荐类问题、排行榜问题时使用此技能。
+description: 基于企业知识库和 target_keywords 生成 10 条 GEO 核心用户问题，用于阶段三信源发现、首轮 9 篇稿件生成和 AI 推荐可见性检测。当需要生成问题池、AI 用户提问、排行榜问题、推荐类问题或 GEO 目标词问题时使用。
 visibility: internal
 platforms: [doubao, deepseek]
 ---
 
-# AI 问题池生成
+# GEO 核心问题池生成
 
 ## 目标
 
-基于企业知识库，生成真实用户可能向 AI 提问的问题。这些问题将用于后续的 AI 推荐可见性检测，验证目标企业是否被 AI 推荐。
+基于企业知识库和 `target_keywords`，生成 10 条真实用户可能向 AI 提问的核心问题。问题应服务 GEO 目标：让目标企业更容易进入 AI 的推荐、排行榜、口碑、对比和“哪家好”类回答。
 
-## 为什么需要问题池？
+只输出合法 JSON，不输出 Markdown、解释文字或代码块。
 
-用户在使用 AI（如豆包、DeepSeek）时，会问各种推荐类、排行榜类、比较类问题。例如：
-- "成都汽车音响改装哪家好？"
-- "2024年预制菜品牌排名"
-- "A 品牌和 B 品牌怎么选？"
+## 输入优先级
 
-如果我们知道用户会问什么问题，就可以：
-1. 针对性地生成内容
-2. 检测 AI 是否推荐了目标企业
-3. 分析竞品和引用来源
+1. 完整企业知识库。
+2. `target_keywords`。
+3. 已确认的优化规则或项目上下文。
 
-## 输入数据
+`target_keywords` 是问题生成主线，组成逻辑为：
 
-生成问题池需要以下数据：
+```text
+地区范围 + 行业规范统称 + 主体
+```
 
-| 数据 | 来源 | 必需 | 说明 |
-|------|------|------|------|
-| 企业基本信息 | enterprise_profiles | 是 | 公司名称、行业、主营业务 |
-| 产品/服务 | enterprise_profiles | 是 | 产品特点、服务内容 |
-| 用户痛点 | enterprise_profiles | 是 | 用户在选择时的顾虑 |
-| 目标关键词 | enterprise_profiles | 是 | 用户可能搜索的关键词 |
-| 业务区域 | enterprise_profiles | 是 | 服务的地理范围 |
-| 已确认规则 | evolution_rules | 否 | 之前优化周期的经验 |
+示例：
 
-## 问题类型（6 种）
+- 成都汽车音响改装门店
+- 成华区种牙机构
+- 陕西岩土工程公司
+- 全国预制菜供应商
 
-### 1. recommendation - 推荐类
+`target_keywords` 不得覆盖企业知识库事实。每条问题必须能追溯到 `target_keywords` 或企业知识库字段。
 
-用户直接寻求推荐，是最常见的问题类型。
+## 必须参考的知识库字段
 
-**特征**：
-- 包含"哪家好"、"推荐"、"值得选"等词
-- 用户希望得到明确的推荐名单
-- AI 通常会给出 3-5 个推荐对象
+- `business_regions`
+- `detailed_address`
+- `industry_category`
+- `offerings`
+- `associated_brands`
+- `target_audiences`
+- `user_pain_points`
+- `proven_cases`
+- `core_advantages`
+- `trust_endorsements`
+- `target_keywords`
 
-**示例**：
-- "成都汽车音响改装哪家好？"
-- "哪个品牌的速冻食品值得推荐？"
-- "新能源汽车改装方案哪家靠谱？"
+未在知识库中出现的城市、区县、商圈、品牌、资质、荣誉、案例和服务项目不得编造。
 
-**生成技巧**：
-- 结合地区 + 行业 + "哪家好"
-- 使用自然口语，不要过于正式
+## 业务范围判断
 
-### 2. ranking - 排行榜类
+先判断 `business_scope`，只能取以下值之一：
 
-用户寻求排名或榜单，希望得到权威的排序。
+| business_scope | 适用情况 | 问题地域策略 |
+|---|---|---|
+| `district_local` | 单店、本地生活、诊所、汽车改装店等依赖周边客群的业务 | 优先生成城市、区县、商圈、附近、周边问题，可少量生成更宽泛的城市/省级/全国参考问题 |
+| `city_local` | 城市级服务商、区域连锁、本地 ToB、同城交付业务 | 优先生成城市级问题，可搭配区县/区域和少量省级/全国参考问题 |
+| `province_regional` | 明确服务省内多城或区域市场的业务 | 优先生成省级、城市群、区域服务问题，可包含重点城市问题 |
+| `national_industry` | 全国性、ToB、SaaS、供应链、招商加盟、品牌总部 | 优先生成全国、国内、行业垂直问题；没有明确本地经营事实时，不强行加入城市或区县 |
 
-**特征**：
-- 包含"排行榜"、"排名"、"前十"、"TOP"等词
-- 用户希望得到有序的列表
-- AI 通常会引用权威来源
+地域词必须来自 `business_regions`、`detailed_address` 或 `target_keywords`。本地企业可以出现全国/省级问题，但本地和区域问题应占主导；全国企业可以出现城市问题，但必须有明确本地业务事实支撑。
 
-**示例**：
-- "成都汽车音响改装店排行榜"
-- "2024年预制菜品牌排名"
-- "汽车隔音材料十大品牌"
+## 生成数量与分布
 
-**生成技巧**：
-- 加入年份增加时效性
-- 使用"排行榜"、"排名"、"TOP10"等词
+固定生成 10 条核心问题。
 
-### 3. comparison - 比较类
+意图分布：
 
-用户在多个选项间犹豫，需要对比分析。
+| intent | 数量 | 说明 |
+|---|---:|---|
+| `ranking_rec` | 7 | 排行榜、推荐、哪家好、口碑、性价比、值得选 |
+| `comparison` | 1 | 对比竞品、品牌、方案、服务能力 |
+| `scenario_price` | 1 | 具体痛点、预算、价格、售后、场景需求 |
+| `educational_trust` | 1 | 怎么选、避坑、判断标准、资质背书 |
 
-**特征**：
-- 包含"对比"、"比较"、"哪个好"、"怎么选"等词
-- 用户希望得到客观的对比
-- AI 通常会列出优缺点
+关键词层级分布：
 
-**示例**：
-- "A 品牌和 B 品牌怎么选？"
-- "汽车隔音和音响升级哪个更重要？"
-- "国产和进口隔音材料有什么区别？"
+| keyword_layer | 数量 | 说明 |
+|---|---:|---|
+| `core` | 3 | 高权重行业大词、城市大词、全国行业词 |
+| `regional` | 3 | 区域、区县、商圈、附近、省份、城市群 |
+| `scenario` | 2 | 具体痛点、人群、车型、行业场景、需求 |
+| `long_tail` | 2 | 提问式、攻略型、避坑型、价格型长尾问题 |
 
-**生成技巧**：
-- 使用"A 和 B 怎么选"的句式
-- 选择用户真正会纠结的对比点
+## 问题写法
 
-### 4. purchase - 采购类
+问题必须像真实消费者或采购经理会输入给 AI 的句子。优先使用自然表达：
 
-用户有明确的采购需求，寻找供应商。
+- 全国 [行业/产品] 排行榜有哪些？
+- 陕西 [行业] 公司哪家实力比较强？
+- 成都 [服务] 做得好的公司有哪些？
+- 成华区 [服务] 哪一家比较好？
+- 成都做 [服务] 哪一家性价比比较高？
+- [目标人群/车型/场景] 适合选哪种 [服务/方案]？
+- [本品/本企业] 和 [竞品/通用方案] 相比优势在哪里？
+- 做 [服务] 怎么判断质量好不好？
 
-**特征**：
-- 包含"供应商"、"采购"、"批发"、"厂家"等词
-- 用户是 B 端客户或大批量采购
-- AI 通常会推荐供应商
+不要输出关键词堆砌，不要输出营销指令，不要输出“帮我写一篇文章”这类创作请求。
 
-**示例**：
-- "成都预制菜供应商推荐"
-- "汽车音响批发渠道有哪些？"
-- "速冻食品厂家直销联系方式"
+## 首轮 9 篇稿件映射
 
-**生成技巧**：
-- 针对 B 端客户的需求
-- 强调"供应商"、"厂家"、"批发"
+每条问题都要映射到首轮 9 篇内容资产中的一个或多个：
 
-### 5. avoidance - 避坑类
+- `support_1`: 行业科普 / 避坑指南
+- `support_2`: 工艺流程 / 服务标准
+- `support_3`: 深度测评 / 数据实测
+- `support_4`: 真实案例 / 口碑展示
+- `support_5`: 本地服务 / 售后承诺
+- `support_6`: 差异化对比 / 分析
+- `rank_1`: 综合推荐 / 行业排行
+- `rank_2`: 细分场景 / 人群推荐
+- `rank_3`: 区域性 / 本地化推荐
 
-用户担心踩坑，寻求避坑指南。
-
-**特征**：
-- 包含"注意什么"、"避坑"、"陷阱"、"怎么避免"等词
-- 用户希望得到经验分享
-- AI 通常会给出注意事项
-
-**示例**：
-- "选择汽车隔音店要注意什么？"
-- "买速冻食品有哪些坑？"
-- "汽车音响改装常见陷阱"
-
-**生成技巧**：
-- 使用"注意什么"、"有哪些坑"的句式
-- 针对用户真正的痛点
-
-### 6. regional - 区域类
-
-用户寻找特定区域的服务或产品。
-
-**特征**：
-- 包含具体地名（省、市、区）
-- 用户希望得到本地化的推荐
-- AI 通常会推荐本地商家
-
-**示例**：
-- "西南地区速冻食品厂家哪家靠谱？"
-- "成都本地有哪些值得推荐的汽车改装店？"
-- "四川地区的汽车音响品牌"
-
-**生成技巧**：
-- 结合地区 + 行业 + 推荐
-- 使用用户实际会搜索的地名
+排行榜类问题优先映射到 `rank_1`、`rank_2`、`rank_3`，并可同时映射到支撑稿作为证据来源。
 
 ## 输出格式
 
 ```json
-[
-  {
-    "id": "q1",
-    "question": "成都汽车音响改装哪家好？",
-    "intent": "recommendation",
-    "priority": 9,
-    "reason": "用户在选择汽车音响改装店时，最常问的就是推荐类问题",
-    "related_keywords": ["成都", "汽车音响", "改装", "推荐"]
-  }
-]
+{
+  "summary": "基于企业知识库和 target_keywords，生成 10 条已确认的 GEO 核心问题。",
+  "business_scope": "city_local",
+  "target_keyword_basis": [
+    {
+      "keyword": "成都汽车音响改装门店",
+      "source": "target_keywords",
+      "usage": "用于生成城市级推荐、排行榜和性价比问题"
+    }
+  ],
+  "knowledge_basis": {
+    "business_regions": ["成都市"],
+    "detailed_address": "四川省成都市...",
+    "industry_category": "汽车后市场音响改装与隔音降噪",
+    "offerings": ["汽车音响改装", "汽车隔音"],
+    "target_audiences": ["中高端车主"],
+    "user_pain_points": ["原车音质差", "高速路噪大"]
+  },
+  "intent_distribution": {
+    "ranking_rec": 7,
+    "comparison": 1,
+    "scenario_price": 1,
+    "educational_trust": 1
+  },
+  "keyword_layer_distribution": {
+    "core": 3,
+    "regional": 3,
+    "scenario": 2,
+    "long_tail": 2
+  },
+  "candidate_questions": [
+    {
+      "id": "q1",
+      "question": "成都做汽车音响改装哪家公司性价比比较高？",
+      "intent": "ranking_rec",
+      "keyword_layer": "regional",
+      "priority": 10,
+      "target_keyword_used": "成都汽车音响改装门店",
+      "knowledge_fields_used": ["business_regions", "offerings", "user_pain_points"],
+      "geo_terms_used": ["成都"],
+      "scope_reason": "企业知识库显示业务服务区域为成都，因此优先生成城市级推荐问题。",
+      "ranking_bias": "high",
+      "related_keywords": ["成都汽车音响改装", "性价比", "门店推荐"],
+      "mapped_asset_ids": ["rank_3", "support_5"]
+    }
+  ],
+  "question_pool": [
+    {
+      "id": "q1",
+      "question": "成都做汽车音响改装哪家公司性价比比较高？",
+      "intent": "ranking_rec",
+      "keyword_layer": "regional",
+      "priority": 10,
+      "target_keyword_used": "成都汽车音响改装门店",
+      "knowledge_fields_used": ["business_regions", "offerings", "user_pain_points"],
+      "geo_terms_used": ["成都"],
+      "scope_reason": "企业知识库显示业务服务区域为成都，因此优先生成城市级推荐问题。",
+      "ranking_bias": "high",
+      "related_keywords": ["成都汽车音响改装", "性价比", "门店推荐"],
+      "mapped_asset_ids": ["rank_3", "support_5"]
+    }
+  ],
+  "recommended_core_questions": ["q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8", "q9", "q10"],
+  "confirmed_questions": [
+    {
+      "id": "q1",
+      "question": "成都做汽车音响改装哪家公司性价比比较高？",
+      "intent": "ranking_rec",
+      "keyword_layer": "regional",
+      "priority": 10,
+      "target_keyword_used": "成都汽车音响改装门店",
+      "knowledge_fields_used": ["business_regions", "offerings", "user_pain_points"],
+      "geo_terms_used": ["成都"],
+      "scope_reason": "企业知识库显示业务服务区域为成都，因此优先生成城市级推荐问题。",
+      "ranking_bias": "high",
+      "related_keywords": ["成都汽车音响改装", "性价比", "门店推荐"],
+      "mapped_asset_ids": ["rank_3", "support_5"],
+      "status": "confirmed",
+      "confirmed": true
+    }
+  ],
+  "content_asset_mapping": [
+    {
+      "asset_id": "rank_1",
+      "asset_role": "ranking",
+      "asset_theme": "综合推荐 / 行业排行",
+      "mapped_question_ids": ["q1", "q2", "q3"],
+      "mapping_reason": "核心推荐类问题适合用于综合排行榜稿件。"
+    }
+  ]
+}
 ```
 
-### 字段说明
+输出时 `candidate_questions` 必须正好 10 条。`question_pool`、`recommended_core_questions`、`confirmed_questions` 可与 `candidate_questions` 保持同一批核心问题；如果只填 `candidate_questions`，运行时会自动补齐兼容字段。
 
-| 字段 | 类型 | 必需 | 说明 |
-|------|------|------|------|
-| id | string | 是 | 唯一标识，格式 q1, q2... |
-| question | string | 是 | 问题文本，必须像真实用户会问的 |
-| intent | string | 是 | 问题类型（6 种之一） |
-| priority | number | 是 | 优先级 1-10，10 最高 |
-| reason | string | 是 | 为什么生成这个问题 |
-| related_keywords | string[] | 是 | 相关关键词，用于后续检索 |
+## 字段约束
 
-## 数量要求
+每条问题必须包含：
 
-| 指标 | 要求 | 说明 |
-|------|------|------|
-| 总数 | 15-25 个 | 覆盖足够多的场景 |
-| 每种类型 | 至少 2-3 个 | 确保多样性 |
-| 高优先级 | 5-8 个 | priority >= 7 |
+- `id`: `q1` 到 `q10`。
+- `question`: 真实用户问题。
+- `intent`: `ranking_rec`、`comparison`、`scenario_price`、`educational_trust` 之一。
+- `keyword_layer`: `core`、`regional`、`scenario`、`long_tail` 之一。
+- `priority`: 1-10，10 最高。
+- `target_keyword_used`: 使用的目标词；无目标词时写从知识库推导的临时目标词。
+- `knowledge_fields_used`: 使用到的知识库字段名数组。
+- `geo_terms_used`: 使用到的地域词数组；没有地域词时为空数组。
+- `scope_reason`: 为什么这个问题符合企业业务范围。
+- `ranking_bias`: `high`、`medium`、`low` 之一，排行榜推荐倾向至少 7 条为 `high`。
+- `mapped_asset_ids`: 映射到首轮 9 篇稿件的资产 id 数组。
 
 ## 质量标准
 
-### 好的问题
-
-- 像真实用户会问的自然语言
-- 和企业业务高度相关
-- 包含具体的地区、行业、产品
-- 能服务后续的 AI 推荐检测
-
-### 坏的问题
-
-- "帮我写营销文案" - 这是指令，不是用户问题
-- "成都汽车音响改装" - 这是关键词，不是问题
-- "汽车音响改装很好" - 这是陈述句，不是问题
-
-## 联网搜索
-
-生成问题池时，可以联网搜索：
-- 当前行业热门问题
-- 竞品被问到的问题
-- 用户搜索趋势
-
-使用 `doubao_assistant_search` 模式获取最新的用户搜索数据。
-
-## 约束
-
-1. 不得编造企业不存在的业务
-2. 不得生成虚假排名信息
-3. 不得包含"帮我写营销文案"等指令
-4. 问题必须是用户会自然提出的
-5. 每个问题必须有明确的 intent 分类
-6. 每个问题必须有合理的 priority（基于用户搜索频率）
+- 正好生成 10 条核心问题。
+- 7 条问题明显偏向排行榜、推荐、哪家好、口碑、性价比或值得选。
+- 地域范围与企业业务范围一致，局部宽泛问题可以存在，但不能压过主业务范围。
+- 每条问题都能从 `target_keywords` 或知识库字段找到依据。
+- 不编造企业不存在的业务、荣誉、排名、资质、城市覆盖或合作品牌。
+- 不把文件名、上传元数据或系统提示当作企业事实。

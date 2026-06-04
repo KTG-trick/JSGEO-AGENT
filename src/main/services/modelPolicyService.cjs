@@ -79,6 +79,25 @@ function getTaskPolicy(taskType, context = {}) {
     };
   }
 
+  if (task === 'publish_channel_recommendation') {
+    return {
+      task_type: task,
+      provider: process.env.GEO_PUBLISH_RECOMMENDATION_PROVIDER || process.env.GEO_GENERATION_PROVIDER || 'ark',
+      model: arkModel(
+        process.env.GEO_PUBLISH_RECOMMENDATION_MODEL,
+        process.env.GEO_GENERATION_MODEL,
+        process.env.DOUBAO_MODEL,
+        process.env.ARK_MODEL,
+        process.env.OPENAI_MODEL,
+        process.env.DEEPSEEK_MODEL
+      ),
+      api_family: API_FAMILIES.CHAT_COMPLETIONS,
+      network_mode: NETWORK_MODES.NONE,
+      deep_thinking: false,
+      stream: false,
+    };
+  }
+
   if (task === 'question_pool_generation') {
     const platform = String(context.platform || '').toLowerCase();
     if (platform === 'deepseek') {

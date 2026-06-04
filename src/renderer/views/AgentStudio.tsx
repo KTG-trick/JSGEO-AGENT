@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowUp,
   Brain,
@@ -73,6 +73,8 @@ import {
 } from '../components/ai-elements/sources';
 import { Suggestion, Suggestions } from '../components/ai-elements/suggestion';
 import { cn } from '../lib/utils';
+import { profileFieldText, toProfileEvidenceField } from '../lib/profileFields';
+import { PROFILE_FIELD_DEFINITIONS } from '../lib/profileSchema';
 import { TooltipProvider } from '../components/ui/tooltip';
 import { useEnterprise } from '../context/EnterpriseContext';
 
@@ -188,29 +190,14 @@ function enqueueTypewriterTask(
   return next;
 }
 
-const PROFILE_SUMMARY_FIELDS: Array<[keyof GeoAgentEnterpriseProfile, string]> = [
-  ['company_name', '公司名称'],
-  ['short_name', '公司简称'],
-  ['industry', '所属行业'],
-  ['main_business', '主营业务'],
-  ['official_website', '官方网站'],
-  ['official_media', '官方自媒体'],
-  ['detailed_intro', '企业详细介绍'],
-  ['brand_story', '品牌故事'],
-  ['products_services', '产品/服务介绍'],
-  ['product_features', '产品/服务特点'],
-  ['user_pain_points', '用户痛点'],
-  ['trust_endorsements', '信任背书'],
-  ['brand_authorization_pricing', '品牌授权与客单价'],
-  ['cases', '行业/客户案例'],
-  ['business_regions', '业务区域范围'],
-  ['customer_service_phone', '客服办公电话'],
-  ['current_pain_points', '目前痛点/现状'],
-  ['core_advantages', '核心优势与特色'],
-  ['extra_info', '其他信息补充'],
-  ['image_notes', '图片内容'],
-  ['target_keywords', '目标关键词'],
-];
+type ProfileFieldDefinition = {
+  key: keyof GeoAgentEnterpriseProfileInput;
+  label: string;
+  group: string;
+};
+
+const profileFieldDefinitions = PROFILE_FIELD_DEFINITIONS as ProfileFieldDefinition[];
+const PROFILE_SUMMARY_FIELDS = profileFieldDefinitions.map((field) => [field.key, field.label] as [keyof GeoAgentEnterpriseProfile, string]);
 const PLACEHOLDER_PROFILE_VALUES = new Set(['', '待补充', '未填', '未填写', DRAFT_PROFILE_NAME]);
 
 function phaseTwoPromptKey(projectId: string, conversationId: string | null, platform: 'doubao' | 'deepseek') {
@@ -280,54 +267,12 @@ function rememberPhaseTwoPromptKey(key: string) {
 const DRAFT_PREVIEW_GROUPS: Array<{
   title: string;
   fields: Array<[keyof GeoAgentEnterpriseProfileInput, string]>;
-}> = [
-  {
-    title: '基础信息',
-    fields: [
-      ['company_name', '公司名称'],
-      ['short_name', '公司简称'],
-      ['industry', '所属行业'],
-      ['main_business', '主营业务'],
-      ['official_website', '官方网站'],
-      ['official_media', '官方自媒体'],
-    ],
-  },
-  {
-    title: '企业介绍',
-    fields: [
-      ['detailed_intro', '企业详细介绍'],
-      ['brand_story', '品牌故事'],
-      ['current_pain_points', '目前痛点/现状'],
-      ['core_advantages', '核心优势与特色'],
-    ],
-  },
-  {
-    title: '产品服务',
-    fields: [
-      ['products_services', '产品/服务介绍'],
-      ['product_features', '产品/服务特点'],
-      ['brand_authorization_pricing', '品牌授权与客单价'],
-    ],
-  },
-  {
-    title: '用户与背书',
-    fields: [
-      ['user_pain_points', '用户痛点'],
-      ['trust_endorsements', '信任背书'],
-      ['cases', '行业/客户案例'],
-      ['business_regions', '业务区域范围'],
-      ['customer_service_phone', '客服办公电话'],
-    ],
-  },
-  {
-    title: '补充与关键词',
-    fields: [
-      ['extra_info', '其他信息补充'],
-      ['image_notes', '图片内容'],
-      ['target_keywords', '目标关键词'],
-    ],
-  },
-];
+}> = ['基础身份', '服务与品牌', '信任与案例', '补充资料'].map((title) => ({
+  title,
+  fields: profileFieldDefinitions
+    .filter((field) => field.group === title)
+    .map((field) => [field.key, field.label]),
+}));
 
 function getSkillPlaceholder(skill: GeoAgentSkill | null) {
   if (!skill) {
@@ -417,18 +362,25 @@ function updateSupportArticleDraft(
     if (!message.supportArticles) {
       return message;
     }
-    const key = draft.article_type === 'review' ? 'review_draft' : 'consulting_draft';
+    const key = ['review', 'business_review'].includes(draft.article_type) ? 'review_draft' : 'consulting_draft';
+    const updateDraftList = (items?: GeoAgentGeoArticleDraft[]) => (
+      Array.isArray(items)
+        ? items.map((item) => (item.id === draft.id ? draft : item))
+        : items
+    );
     const nextSupportArticles = {
       ...message.supportArticles,
       [key]: draft,
+      support_drafts: updateDraftList(message.supportArticles.support_drafts),
+      ranking_drafts: updateDraftList(message.supportArticles.ranking_drafts),
     };
     const consultingConfirmed = nextSupportArticles.consulting_draft?.status === 'confirmed';
     const reviewConfirmed = nextSupportArticles.review_draft?.status === 'confirmed';
     return {
       ...message,
       content: consultingConfirmed && reviewConfirmed
-        ? '阶段四支撑内容已确认完成。\n\n咨询类和测评类草稿都已确认，后续可以进入阶段五排行榜文章生成。'
-        : '草稿已确认。请继续确认另一篇支撑草稿，两个都确认后才能进入阶段五。',
+        ? '阶段四内容资产已确认。\n\n可前往稿件管理页校对稿件、生成 OSS 预览、选择媒体投递并同步订单状态。'
+        : '草稿已确认。请继续确认其他关键草稿，完成后可进入稿件管理与发布。',
       supportArticles: nextSupportArticles,
       status: 'complete',
     };
@@ -469,18 +421,18 @@ function getNextWorkflowAction(
   ) {
     return {
       type: 'support_articles',
-      label: '建议继续执行：阶段四咨询/测评支撑内容',
-      primaryLabel: '生成阶段四支撑内容',
+      label: '建议继续执行：阶段四首轮 9 篇内容资产',
+      primaryLabel: '生成 9 篇内容资产',
     };
   }
 
   const consultingConfirmed = message.supportArticles?.consulting_draft?.status === 'confirmed';
   const reviewConfirmed = message.supportArticles?.review_draft?.status === 'confirmed';
-  if (stageFiveStatus ? stageFiveStatus === 'ready' : consultingConfirmed && reviewConfirmed) {
+  if (message.supportArticles && (stageFiveStatus ? stageFiveStatus === 'ready' : consultingConfirmed && reviewConfirmed)) {
     return {
       type: 'stage_five_waiting',
-      label: '阶段四支撑内容已确认，阶段五排行榜文章模块开放后即可继续。',
-      primaryLabel: '阶段五待开发',
+      label: '阶段四内容资产已生成，可前往稿件管理页进行发布分发和推荐检测。',
+      primaryLabel: '前往稿件管理',
     };
   }
 
@@ -505,6 +457,32 @@ function hasPhaseTwoMessageFor(
       return false;
     }
     return message.phaseTwoPrompt?.id === project.id || message.geoReport?.geo_project_id === project.id;
+  });
+}
+
+function normalizeRestoredWorkflowMessages(messages: ChatMessage[]) {
+  const completedPlatforms = new Set(
+    messages
+      .filter((message) => message.geoReport || message.sourceDiscovery || message.supportArticles)
+      .map((message) => getMessagePlatform(message))
+      .filter((platform): platform is 'doubao' | 'deepseek' => Boolean(platform))
+  );
+
+  if (completedPlatforms.size === 0) {
+    return messages;
+  }
+
+  return messages.map((message) => {
+    const platform = getMessagePlatform(message);
+    if (!message.phaseTwoPrompt || !platform || !completedPlatforms.has(platform)) {
+      return message;
+    }
+    return {
+      ...message,
+      phaseTwoPrompt: undefined,
+      confirmationState: 'output-available' as const,
+      confirmationApproved: true,
+    };
   });
 }
 
@@ -592,10 +570,14 @@ function hasProfileValue(value: unknown) {
   if (value === null || value === undefined) {
     return false;
   }
-  const text = String(value).trim();
+  const text = profileValueText(value);
   return Boolean(text)
     && !PLACEHOLDER_PROFILE_VALUES.has(text)
     && !text.startsWith('这是通过智能助手知识库录入技能自动创建的草稿');
+}
+
+function profileValueText(value: unknown): string {
+  return profileFieldText({ value }, 'value');
 }
 
 function upsertReasoningStep(
@@ -623,8 +605,8 @@ function isConfirmableKnowledgeDraft(draft?: GeoAgentKnowledgeDraft | null) {
   const hasFacts = Array.isArray(draft.facts) && draft.facts.length > 0;
   const hasProfile = [
     draft.profile.company_name,
-    draft.profile.main_business,
-    draft.profile.products_services,
+    draft.profile.industry_category,
+    draft.profile.offerings,
     draft.profile.core_advantages,
     draft.profile.target_keywords,
   ].some(hasProfileValue);
@@ -632,13 +614,13 @@ function isConfirmableKnowledgeDraft(draft?: GeoAgentKnowledgeDraft | null) {
 }
 
 function buildLongTailPreview(profile: GeoAgentEnterpriseProfileInput) {
-  const rawKeywords = String(profile.target_keywords ?? '');
+  const rawKeywords = profileFieldText(profile as Record<string, unknown>, 'target_keywords');
   const keywords = rawKeywords
     .split(/[\n,，、;；|]+/)
     .map((item) => item.trim().replace(/\s+/g, ''))
     .filter((item) => item && !/(怎么|如何|哪家|为什么|推荐|排行榜|口碑|靠谱|支持|选择)/.test(item))
     .slice(0, 6);
-  const region = extractPreviewRegion(String(profile.business_regions ?? ''));
+  const region = extractPreviewRegion(profileFieldText(profile as Record<string, unknown>, 'business_regions'));
   const rows: string[] = [];
   keywords.forEach((keyword) => {
     rows.push(`${keyword}哪家好`, `${keyword}公司推荐`, `${keyword}怎么选`);
@@ -661,7 +643,8 @@ function buildKnowledgeSavedSummary(profile: GeoAgentEnterpriseProfile, fileCoun
   const missingFields = PROFILE_SUMMARY_FIELDS
     .filter(([field]) => !hasProfileValue(profile[field]))
     .map(([, label]) => label);
-  const name = hasProfileValue(profile.company_name) ? profile.company_name : '新的企业知识库';
+  const companyName = profileFieldText(profile as Record<string, unknown>, 'company_name');
+  const name = hasProfileValue(profile.company_name) ? companyName : '新的企业知识库';
   const savedPreview = savedFields.slice(0, 12).join('、') || '附件原文片段';
   const missingPreview = missingFields.slice(0, 8).join('、');
 
@@ -684,11 +667,10 @@ async function ensureDraftEnterpriseProfile(seedText: string) {
   const displayName = companyHint || DRAFT_PROFILE_NAME;
   await window.geoAgent.saveEnterpriseProfile({
     project_id: projectId,
-    company_name: displayName,
-    short_name: displayName,
-    industry: '待补充',
-    main_business: '待补充',
-    detailed_intro: '这是通过智能助手知识库录入技能自动创建的草稿。请继续补充公司名称、主营业务、企业介绍、产品服务、用户痛点、信任背书、案例、业务区域和目标关键词。',
+    company_name: toProfileEvidenceField(displayName),
+    short_name: toProfileEvidenceField(displayName),
+    industry_category: toProfileEvidenceField('待补充'),
+    detailed_intro: toProfileEvidenceField('这是通过智能助手知识库录入技能自动创建的草稿。请继续补充公司名称、详细地址、产品与服务、用户痛点、信任背书、案例、业务区域和目标关键词。'),
   });
   window.dispatchEvent(new CustomEvent('geo-agent-enterprises-refresh'));
   return projectId;
@@ -1316,7 +1298,7 @@ export function AgentStudio() {
           if (event.type === 'result' && event.question_set) {
             // 保存问题集作为 report
             const qs = event.question_set;
-            const pool = (qs.questions.question_pool as unknown[]) || [];
+            const pool = (qs.questions.confirmed_questions as unknown[]) || (qs.questions.question_pool as unknown[]) || [];
             const ranking = (qs.questions.ranking_questions as unknown[]) || [];
             report = {
               id: qs.id,
@@ -1331,7 +1313,7 @@ export function AgentStudio() {
             };
             // 写入简洁的描述到 content（替代之前累加的原始 JSON）
             setMessages((current) => updateMessage(current, phaseTwoTargetId, {
-              content: `已生成 ${pool.length} 个用户问题，其中 ${ranking.length} 个高优先级排行榜问题。`,
+              content: `已基于企业知识库和目标词生成 ${pool.length} 条核心问题，其中 ${ranking.length} 条偏向排行榜/推荐。`,
             }));
           }
           if (event.type === 'done' && event.content) {
@@ -1358,16 +1340,11 @@ export function AgentStudio() {
         throw new Error('阶段二没有返回可用结果，请重试。');
       }
 
-      // 步骤 2：确认问题池
-      if (window.geoAgent.confirmGeoPhaseTwo) {
-        await window.geoAgent.confirmGeoPhaseTwo(project.id, platform, messageId);
-      }
-
       await refreshWorkflowState(project.id);
       setMessages((current) => updateMessage(current, phaseTwoTargetId, {
         content: report!.status === 'failed'
           ? `${platformLabel} 排行榜问题池生成失败：${report!.error_message || '未知错误'}`
-          : `已完成${platformLabel}阶段二：${project.company_name}\n\n已生成用户问题池和高优先级排行榜问题。下一步是发现高权重信源。`,
+          : `已完成${platformLabel}阶段二：${project.company_name}\n\n已基于企业知识库和目标词生成 10 条核心问题，并自动确认为本轮 GEO 北极星问题。下一步是发现高权重信源。`,
         geoReport: report!,
         phaseTwoPrompt: undefined,
         phaseTwoPlatform: undefined,
@@ -1382,7 +1359,7 @@ export function AgentStudio() {
           ...backendResultMessage!,
           content: report!.status === 'failed'
             ? `${platformLabel} 排行榜问题池生成失败：${report!.error_message || '未知错误'}`
-            : `已完成${platformLabel}阶段二：${project.company_name}\n\n已生成用户问题池和高优先级排行榜问题。下一步是发现高权重信源。`,
+            : `已完成${platformLabel}阶段二：${project.company_name}\n\n已基于企业知识库和目标词生成 10 条核心问题，并自动确认为本轮 GEO 北极星问题。下一步是发现高权重信源。`,
           geoReport: report!,
           phaseTwoPrompt: undefined,
           phaseTwoPlatform: undefined,
@@ -1567,7 +1544,7 @@ export function AgentStudio() {
     const shouldCreateBackendMessage = messageId.startsWith('stage-four-prompt-');
     setMessages((current) => updateMessage(current, messageId, {
       content: '',
-      reasoning: `正在生成${platformLabelFor(platform)}阶段四支撑内容。`,
+      reasoning: `正在生成${platformLabelFor(platform)}阶段四 9 篇内容资产。`,
       supportArticlesPrompt: undefined,
       confirmationState: 'approval-responded',
       confirmationApproved: true,
@@ -1599,7 +1576,7 @@ export function AgentStudio() {
             }
             const nextMessage: ChatMessage = {
               ...restored,
-              reasoning: `正在生成${platformLabelFor(platform)}阶段四支撑内容。`,
+              reasoning: `正在生成${platformLabelFor(platform)}阶段四 9 篇内容资产。`,
               articleDraftExecution: { platform, activeStep: 0 },
               articleDraftAttempts: { consulting: true, review: true },
               status: 'streaming',
@@ -1609,7 +1586,7 @@ export function AgentStudio() {
           if (event.type === 'status') {
             const statusMessage = typeof event.message === 'string' ? event.message : undefined;
             setMessages((current) => updateMessage(current, stageMessageId, {
-              reasoning: statusMessage ?? event.step_label ?? `正在生成${platformLabelFor(platform)}阶段四支撑内容。`,
+              reasoning: statusMessage ?? event.step_label ?? `正在生成${platformLabelFor(platform)}阶段四 9 篇内容资产。`,
               articleDraftExecution: {
                 platform,
                 activeStep: typeof event.step_index === 'number' ? event.step_index : 0,
@@ -1640,8 +1617,8 @@ export function AgentStudio() {
       await refreshWorkflowState(discovery.geo_project_id);
       setMessages((current) => updateMessage(current, stageMessageId, {
         content: result!.status === 'completed'
-          ? `已完成${platformLabelFor(platform)}阶段四支撑内容。\n\n咨询类和测评类草稿已生成。请先查看并确认两篇草稿，确认完成后阶段五才会开放。`
-          : `阶段四支撑内容部分生成失败：${result!.error_message || '请查看失败项并重试。'}`,
+          ? `已完成${platformLabelFor(platform)}阶段四内容资产。\n\n已生成支撑文章和排行榜文章草稿，可在稿件管理页继续校对、发布和检测。`
+          : `阶段四内容资产部分生成失败：${result!.error_message || '请查看失败项并重试。'}`,
         supportArticles: result!,
         articleDraftExecution: undefined,
         actionBusy: false,
@@ -1663,7 +1640,7 @@ export function AgentStudio() {
 
   const cancelSupportArticles = (messageId: string) => {
     setMessages((current) => updateMessage(current, messageId, {
-      content: '已暂缓生成阶段四支撑内容。当前信源发现结果已保留，稍后可重新启动支撑内容生成。',
+      content: '已暂缓生成阶段四内容资产。当前信源发现结果已保留，稍后可重新启动内容生成。',
       supportArticlesPrompt: undefined,
       confirmationState: 'output-available',
       confirmationApproved: false,
@@ -1730,7 +1707,7 @@ export function AgentStudio() {
       setMessages((current) => updateMessage(current, messageId, {
         content: draft.status === 'failed'
           ? `${articleTypeLabelFor(articleType)}支撑文章生成失败：${draft.draft.error_message || '未知错误'}`
-          : `已生成${platformLabelFor(platform)}${articleTypeLabelFor(articleType)}支撑文章草稿。\n\n下一步继续补齐咨询类和测评类两类支撑内容，完成后再进入排行榜文章。`,
+          : `已生成${platformLabelFor(platform)}${articleTypeLabelFor(articleType)}文章草稿。\n\n下一步可继续补齐内容资产，或前往稿件管理页校对发布。`,
         articleDraft: draft,
         articleDraftExecution: undefined,
         actionBusy: false,
@@ -1797,7 +1774,7 @@ export function AgentStudio() {
       setMessages((current) => appendMessageIfMissing(current, {
         id: `knowledge-confirmed-${response.conversation_id || response.project_id}-${Date.now()}`,
         role: 'assistant',
-        content: `已建立「${response.profile.company_name}」企业知识库，并完成本地索引。\n\n已生成 ${response.total} 条知识条目。`,
+        content: `已建立「${profileFieldText(response.profile as Record<string, unknown>, 'company_name') || '企业'}」企业知识库，并完成本地索引。\n\n已生成 ${response.total} 条知识条目。`,
         confirmationState: 'output-available',
         confirmationApproved: true,
         status: 'complete',
@@ -1881,7 +1858,7 @@ export function AgentStudio() {
       .filter((message) => message.role === 'user' || message.role === 'assistant')
       .map((message) => restoreConversationMessage(message));
     setConversationId(response.conversation.id);
-    setMessages(restoredMessages);
+    setMessages(normalizeRestoredWorkflowMessages(restoredMessages));
     setInputValue('');
     setSelectedSkill(null);
     localStorage.setItem(options?.storageKey ?? conversationStorageKey(response.conversation.project_id ?? currentEnterprise?.id, response.conversation.id), response.conversation.id);
@@ -1903,16 +1880,16 @@ export function AgentStudio() {
         {
           icon: GraduationCap,
           text: selectedStageFourStatus === 'completed'
-            ? '阶段五已就绪'
+            ? '发布分发已就绪'
             : selectedStageThreeStatus === 'completed'
               ? '生成支撑内容'
               : selectedStageTwoStatus === 'completed'
                 ? '发现高权重信源'
                 : '生成排行榜问题池',
           value: selectedStageFourStatus === 'completed'
-            ? `${currentEnterprise.name}的阶段四支撑草稿已确认，阶段五排行榜文章模块开放后即可继续。`
+            ? `${currentEnterprise.name}的阶段四内容资产已生成，可前往稿件管理页发布并运行推荐检测。`
             : selectedStageThreeStatus === 'completed'
-              ? `基于${currentEnterprise.name}已完成的信源发现结果，生成阶段四咨询类和测评类支撑内容。`
+              ? `基于${currentEnterprise.name}已完成的信源发现结果，生成阶段四 9 篇内容资产。`
               : selectedStageTwoStatus === 'completed'
                 ? `基于${currentEnterprise.name}的排行榜问题池，继续发现当前所选平台的高权重信源。`
                 : `基于${currentEnterprise.name}的企业知识库，生成当前所选平台的排行榜问题池。`,
@@ -2401,7 +2378,7 @@ const ChatBubble: React.FC<{
           onCancel={() => onCancelSupportArticles(message.id)}
           onConfirm={() => onConfirmSupportArticles(message.id, message.supportArticlesPrompt!)}
           state={message.confirmationState ?? 'approval-requested'}
-          title={`是否生成${platformLabelFor(message.supportArticlesPrompt.platform === 'deepseek' ? 'deepseek' : 'doubao')}阶段四支撑内容？确认后会同时生成咨询类和测评类草稿。`}
+          title={`是否生成${platformLabelFor(message.supportArticlesPrompt.platform === 'deepseek' ? 'deepseek' : 'doubao')}阶段四内容资产？确认后会生成首轮支撑文章和排行榜文章草稿。`}
           confirmLabel="确认生成支撑内容"
           cancelLabel="暂不生成"
           busy={message.actionBusy}
@@ -2425,8 +2402,8 @@ const ChatBubble: React.FC<{
       )}
       {nextAction?.type === 'stage_five_waiting' && (
         <AssistantActionBar
-          disabled
           label={nextAction.label}
+          onClick={() => window.dispatchEvent(new CustomEvent('geo-agent-open-view', { detail: { view: 'drafts' } }))}
           primaryLabel={nextAction.primaryLabel}
         />
       )}
@@ -2542,7 +2519,7 @@ const KnowledgeDraftPreview: React.FC<{
                   <div className="grid gap-1" key={field}>
                     <span className="text-[11px] font-semibold text-[#8a837a] dark:text-[#969696]">{label}</span>
                     <p className="line-clamp-3 whitespace-pre-wrap text-[13px] leading-relaxed text-[#34312d] dark:text-[#eeeeee]">
-                      {String(profile[field] ?? '')}
+                      {profileFieldText(profile as Record<string, unknown>, field)}
                     </p>
                   </div>
                 ))}
@@ -2729,7 +2706,7 @@ const ArticleDraftRunning: React.FC<{
     icon={FileText}
     steps={ARTICLE_DRAFT_STEPS}
     subtitle="这一步只生成排行榜前置支撑内容，不生成排行榜文章。"
-    title={`正在生成${platformLabelFor(execution.platform)}阶段四支撑内容`}
+    title={`正在生成${platformLabelFor(execution.platform)}阶段四内容资产`}
   />
 );
 
@@ -2742,32 +2719,39 @@ const GeoCheckReportCard: React.FC<{ report: GeoAgentGeoReport }> = ({ report })
     );
   }
   const platformLabel = platformLabelFor(report.platform === 'deepseek' ? 'deepseek' : 'doubao');
-  const rankingQuestions = report.report.ranking_questions ?? [];
+  const coreQuestions = (report.report.confirmed_questions ?? report.report.question_pool ?? []) as unknown[];
+  const rankingQuestions = (report.report.ranking_questions ?? coreQuestions) as unknown[];
   return (
     <div className="mb-5 space-y-4 border-b border-outline-variant/20 pb-5">
       <div>
         <div className="flex items-center gap-2 text-[14px] font-bold text-primary">
           <Target className="size-4 text-secondary" />
-          {platformLabel} 阶段二结果：排行榜问题池
+          {platformLabel} 阶段二结果：10 条核心问题
         </div>
-        <p className="mt-2 text-[13px] leading-relaxed text-on-surface-variant">{report.report.summary || '已生成阶段二排行榜问题池。'}</p>
+        <p className="mt-2 text-[13px] leading-relaxed text-on-surface-variant">{report.report.summary || '已基于企业知识库和目标词生成 10 条核心问题。'}</p>
       </div>
       <div className="rounded-2xl bg-[#eef6ff] p-4 text-[13px] leading-relaxed text-[#174d88] dark:bg-[#17324d] dark:text-[#c9e4ff]">
         <div className="font-bold">第二步主要做什么？</div>
         <p className="mt-1">
-          它不是写文章，也不是发稿；它是在当前平台上确定“用户会问哪些排行榜/推荐类问题”，并选出后续最值得优先做内容的题目。
+          它不是写文章，也不是发稿；它是基于企业知识库和 target_keywords 直接生成 10 条核心用户问题，作为阶段三信源发现、首轮 9 篇稿件和 Visibility Rate 检测的输入。
         </p>
       </div>
       <ReportSection
-        title="本阶段重点：优先做这几个排行榜题目"
-        items={rankingQuestions}
-        limit={3}
+        title="本阶段核心问题"
+        items={coreQuestions}
+        limit={10}
         variant="strong"
       />
+      <ReportSection
+        title="排行榜/推荐倾向问题"
+        items={rankingQuestions}
+        limit={7}
+        compact
+      />
       <details className="rounded-2xl bg-white/50 p-3 text-[12px] dark:bg-[#1f1f1f]/70">
-        <summary className="cursor-pointer font-bold text-primary">查看完整问题池</summary>
+        <summary className="cursor-pointer font-bold text-primary">查看问题池结构</summary>
         <div className="mt-3">
-          <ReportSection title="用户真实问题池" items={report.report.question_pool ?? []} limit={8} compact />
+          <ReportSection title="候选兼容列表" items={report.report.candidate_questions ?? []} limit={10} compact />
         </div>
       </details>
     </div>
@@ -2877,28 +2861,48 @@ const ArticleDraftCard: React.FC<{ draft: GeoAgentGeoArticleDraft }> = ({ draft 
 const SupportArticlesCard: React.FC<{
   result: GeoAgentGeoSupportArticleRunResponse;
   onConfirmDraft: (articleId: string) => void;
-}> = ({ onConfirmDraft, result }) => (
-  <div className="mb-5 space-y-4 border-b border-outline-variant/20 pb-5">
-    <div>
-      <div className="flex items-center gap-2 text-[14px] font-bold text-primary">
-        <FileText className="size-4 text-secondary" />
-        阶段四结果：咨询/测评支撑内容
+}> = ({ onConfirmDraft, result }) => {
+  const supportDrafts = Array.isArray(result.support_drafts) ? result.support_drafts : [];
+  const rankingDrafts = Array.isArray(result.ranking_drafts) ? result.ranking_drafts : [];
+  const allDrafts = [...supportDrafts, ...rankingDrafts];
+  return (
+    <div className="mb-5 space-y-4 border-b border-outline-variant/20 pb-5">
+      <div>
+        <div className="flex items-center gap-2 text-[14px] font-bold text-primary">
+          <FileText className="size-4 text-secondary" />
+          阶段四结果：首轮 9 篇内容资产
+        </div>
+        <p className="mt-2 text-[13px] leading-relaxed text-on-surface-variant">
+          已基于企业知识库、核心问题和阶段三信源发现生成支撑文章与排行榜文章草稿，可继续校对和补充发布 URL。
+        </p>
       </div>
-      <p className="mt-2 text-[13px] leading-relaxed text-on-surface-variant">
-        已生成排行榜文章的前置支撑草稿。本阶段只产出支撑内容，不生成排行榜文章。
-      </p>
-    </div>
-    <div className="grid gap-3 md:grid-cols-2">
-      <SupportArticleSummaryCard draft={result.consulting_draft ?? null} label="咨询类支撑文章" onConfirmDraft={onConfirmDraft} />
-      <SupportArticleSummaryCard draft={result.review_draft ?? null} label="测评类支撑文章" onConfirmDraft={onConfirmDraft} />
-    </div>
-    {result.error_message && (
-      <div className="rounded-2xl bg-red-50 p-4 text-[13px] text-red-700 dark:bg-red-950/30 dark:text-red-200">
-        {result.error_message}
+      <div className="grid gap-3 md:grid-cols-2">
+        <SupportArticleSummaryCard draft={result.consulting_draft ?? null} label="企业/品牌支撑文章" onConfirmDraft={onConfirmDraft} />
+        <SupportArticleSummaryCard draft={result.review_draft ?? null} label="业务/测评支撑文章" onConfirmDraft={onConfirmDraft} />
       </div>
-    )}
-  </div>
-);
+      {allDrafts.length > 0 && (
+        <div className="rounded-2xl bg-white/50 p-4 text-[12px] leading-relaxed text-on-surface-variant dark:bg-[#1f1f1f]/70">
+          <div className="mb-2 font-bold text-primary">全部草稿（{allDrafts.length} 篇）</div>
+          <div className="grid gap-2">
+            {allDrafts.map((draft) => (
+              <div key={draft.id} className="rounded-xl bg-[#faf9f7] px-3 py-2 dark:bg-[#161616]">
+                <div className="font-semibold text-[#2f2f2f] dark:text-[#f1f1f1]">{draft.draft.title || '未命名草稿'}</div>
+                <div className="mt-1">
+                  {draft.draft.article_role === 'ranking' ? '排行榜文章' : '支撑文章'} · {draft.draft.article_theme || draft.article_type}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {result.error_message && (
+        <div className="rounded-2xl bg-red-50 p-4 text-[13px] text-red-700 dark:bg-red-950/30 dark:text-red-200">
+          {result.error_message}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const SupportArticleSummaryCard: React.FC<{
   draft: GeoAgentGeoArticleDraft | null;
@@ -2941,7 +2945,7 @@ const SupportArticleSummaryCard: React.FC<{
                 id={draft.id}
                 onConfirm={() => onConfirmDraft(draft.id)}
                 state="approval-requested"
-                title="确认后此草稿可作为阶段五输入。"
+                title="确认后此草稿可进入稿件管理页发布分发。"
                 variant="action"
               />
             </div>
@@ -3296,12 +3300,21 @@ function restoreConversationMessage(message: GeoAgentConversationMessage): ChatM
       ? metadata.confirmation_state as ChatMessage['confirmationState']
       : 'approval-requested';
     const report = metadata.report as GeoAgentGeoReport | undefined;
+    const sourceDiscovery = metadata.source_discovery as GeoAgentGeoSourceDiscovery | undefined;
+    const supportArticles = metadata.support_articles as GeoAgentGeoSupportArticleRunResponse | undefined;
+    const isPendingPrompt = Boolean(project && confirmationState === 'approval-requested' && metadata.status === 'pending');
     return {
       ...baseMessage,
       content: message.content,
-      phaseTwoPrompt: project,
+      phaseTwoPrompt: isPendingPrompt ? project : undefined,
       phaseTwoPlatform: platform,
       geoReport: report,
+      sourceDiscovery,
+      supportArticles,
+      sourceDiscoveryAttempted: Boolean(sourceDiscovery) || Number(metadata.phase || 0) === 3,
+      articleDraftAttempts: supportArticles
+        ? { consulting: Boolean(supportArticles.consulting_draft), review: Boolean(supportArticles.review_draft) }
+        : undefined,
       confirmationState,
       confirmationApproved: typeof metadata.confirmation_approved === 'boolean'
         ? metadata.confirmation_approved

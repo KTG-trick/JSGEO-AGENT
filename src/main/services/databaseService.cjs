@@ -21,11 +21,16 @@ function initializeDatabase(baseDir) {
 
   fs.mkdirSync(baseDir, { recursive: true });
   dbPath = getDatabasePath(baseDir);
-  db = new Database(dbPath);
-  db.pragma('foreign_keys = ON');
-  db.pragma('journal_mode = WAL');
-  db.pragma('busy_timeout = 5000');
-  createSchema(db);
+  try {
+    db = new Database(dbPath);
+    db.pragma('foreign_keys = ON');
+    db.pragma('journal_mode = WAL');
+    db.pragma('busy_timeout = 5000');
+    createSchema(db);
+  } catch (error) {
+    closeDatabase();
+    throw error;
+  }
   return db;
 }
 
@@ -92,6 +97,28 @@ function createSchema(database) {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS knowledge_assets (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      entry_id TEXT REFERENCES knowledge_entries(id) ON DELETE SET NULL,
+      original_filename TEXT NOT NULL,
+      storage_path TEXT NOT NULL,
+      mime_type TEXT,
+      file_size INTEGER NOT NULL DEFAULT 0,
+      sha256 TEXT NOT NULL,
+      parse_status TEXT NOT NULL DEFAULT 'pending',
+      embedding_status TEXT NOT NULL DEFAULT 'pending',
+      error_message TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_assets_project
+      ON knowledge_assets(project_id, created_at);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_assets_sha256
+      ON knowledge_assets(project_id, sha256);
+
     CREATE TABLE IF NOT EXISTS knowledge_chunks (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -111,6 +138,18 @@ function createSchema(database) {
 
     CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_chunks_fts
       USING fts5(id UNINDEXED, project_id UNINDEXED, title, content);
+
+    CREATE TABLE IF NOT EXISTS knowledge_chunk_embeddings (
+      chunk_id TEXT PRIMARY KEY REFERENCES knowledge_chunks(id) ON DELETE CASCADE,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      embedding_json TEXT NOT NULL,
+      embedding_model TEXT,
+      dimensions INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_chunk_embeddings_project
+      ON knowledge_chunk_embeddings(project_id);
 
     CREATE TABLE IF NOT EXISTS conversations (
       id TEXT PRIMARY KEY,
@@ -217,6 +256,54 @@ function createSchema(database) {
     CREATE INDEX IF NOT EXISTS idx_geo_article_drafts_project_status
       ON geo_article_drafts(project_id, status, created_at);
 
+    CREATE TABLE IF NOT EXISTS publish_resources (
+      id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      resource_type TEXT NOT NULL,
+      resource_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      price REAL,
+      platform INTEGER,
+      area INTEGER,
+      category INTEGER,
+      status INTEGER,
+      raw_json TEXT NOT NULL,
+      synced_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_publish_resources_provider_type_id
+      ON publish_resources(provider, resource_type, resource_id);
+
+    CREATE INDEX IF NOT EXISTS idx_publish_resources_type_status
+      ON publish_resources(resource_type, status, synced_at);
+
+    CREATE TABLE IF NOT EXISTS publish_orders (
+      id TEXT PRIMARY KEY,
+      article_id TEXT NOT NULL REFERENCES geo_article_drafts(id) ON DELETE CASCADE,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL,
+      resource_type TEXT NOT NULL,
+      partner_sn TEXT NOT NULL,
+      external_sn TEXT,
+      resource_id INTEGER NOT NULL,
+      preview_url TEXT,
+      status_code INTEGER,
+      published_url TEXT,
+      feedback_json TEXT,
+      raw_json TEXT,
+      last_synced_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_publish_orders_provider_partner_sn
+      ON publish_orders(provider, partner_sn);
+
+    CREATE INDEX IF NOT EXISTS idx_publish_orders_article
+      ON publish_orders(article_id, created_at);
+
     CREATE TABLE IF NOT EXISTS ai_visibility_checks (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -315,6 +402,92 @@ function migrateSchema(database) {
   addColumn('summary_dirty', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('message_count', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('last_message_preview', 'TEXT');
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS publish_resources (
+      id TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      resource_type TEXT NOT NULL,
+      resource_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      price REAL,
+      platform INTEGER,
+      area INTEGER,
+      category INTEGER,
+      status INTEGER,
+      raw_json TEXT NOT NULL,
+      synced_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_publish_resources_provider_type_id
+      ON publish_resources(provider, resource_type, resource_id);
+
+    CREATE INDEX IF NOT EXISTS idx_publish_resources_type_status
+      ON publish_resources(resource_type, status, synced_at);
+
+    CREATE TABLE IF NOT EXISTS publish_orders (
+      id TEXT PRIMARY KEY,
+      article_id TEXT NOT NULL REFERENCES geo_article_drafts(id) ON DELETE CASCADE,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL,
+      resource_type TEXT NOT NULL,
+      partner_sn TEXT NOT NULL,
+      external_sn TEXT,
+      resource_id INTEGER NOT NULL,
+      preview_url TEXT,
+      status_code INTEGER,
+      published_url TEXT,
+      feedback_json TEXT,
+      raw_json TEXT,
+      last_synced_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_publish_orders_provider_partner_sn
+      ON publish_orders(provider, partner_sn);
+
+    CREATE INDEX IF NOT EXISTS idx_publish_orders_article
+      ON publish_orders(article_id, created_at);
+  `);
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS knowledge_assets (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      entry_id TEXT REFERENCES knowledge_entries(id) ON DELETE SET NULL,
+      original_filename TEXT NOT NULL,
+      storage_path TEXT NOT NULL,
+      mime_type TEXT,
+      file_size INTEGER NOT NULL DEFAULT 0,
+      sha256 TEXT NOT NULL,
+      parse_status TEXT NOT NULL DEFAULT 'pending',
+      embedding_status TEXT NOT NULL DEFAULT 'pending',
+      error_message TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_assets_project
+      ON knowledge_assets(project_id, created_at);
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_assets_sha256
+      ON knowledge_assets(project_id, sha256);
+
+    CREATE TABLE IF NOT EXISTS knowledge_chunk_embeddings (
+      chunk_id TEXT PRIMARY KEY REFERENCES knowledge_chunks(id) ON DELETE CASCADE,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      embedding_json TEXT NOT NULL,
+      embedding_model TEXT,
+      dimensions INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_knowledge_chunk_embeddings_project
+      ON knowledge_chunk_embeddings(project_id);
+  `);
 
   database.exec(`
     UPDATE conversations

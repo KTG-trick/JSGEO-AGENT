@@ -18,6 +18,11 @@ import {
   Upload,
   X,
 } from 'lucide-react';
+import { profileFieldText, toProfileEvidenceField } from '../lib/profileFields';
+import {
+  PROFILE_ARRAY_FIELDS,
+  PROFILE_FIELD_DEFINITIONS,
+} from '../lib/profileSchema';
 
 type KnowledgeMode = 'list' | 'detail' | 'builder';
 
@@ -63,53 +68,93 @@ type UploadedImageAsset = {
   previewUrl: string;
 };
 
-type ProfileFormState = {
-  company_name: string;
-  short_name: string;
-  industry: string;
-  main_business: string;
-  official_website: string;
-  official_media: string;
-  detailed_intro: string;
-  brand_story: string;
-  products_services: string;
-  product_features: string;
-  user_pain_points: string;
-  trust_endorsements: string;
-  brand_authorization_pricing: string;
-  cases: string;
-  business_regions: string;
-  customer_service_phone: string;
-  current_pain_points: string;
-  core_advantages: string;
-  extra_info: string;
-  image_notes: string;
-  target_keywords: string;
+type ProfileFieldKey =
+  | 'company_name'
+  | 'short_name'
+  | 'detailed_address'
+  | 'business_regions'
+  | 'industry_category'
+  | 'offerings'
+  | 'associated_brands'
+  | 'target_audiences'
+  | 'core_advantages'
+  | 'trust_endorsements'
+  | 'user_pain_points'
+  | 'proven_cases'
+  | 'target_keywords'
+  | 'contact_info'
+  | 'official_website'
+  | 'official_media'
+  | 'detailed_intro'
+  | 'brand_story'
+  | 'current_pain_points'
+  | 'extra_info'
+  | 'image_notes';
+
+type ProfileFormState = Record<ProfileFieldKey, string>;
+
+type ProfileFieldDefinition = {
+  key: ProfileFieldKey;
+  label: string;
+  group: string;
+  isArray?: boolean;
+  required?: boolean;
 };
 
-const emptyProfile: ProfileFormState = {
-  company_name: '',
-  short_name: '',
-  industry: '',
-  main_business: '',
-  official_website: '',
-  official_media: '',
-  detailed_intro: '',
-  brand_story: '',
-  products_services: '',
-  product_features: '',
-  user_pain_points: '',
-  trust_endorsements: '',
-  brand_authorization_pricing: '',
-  cases: '',
-  business_regions: '',
-  customer_service_phone: '',
-  current_pain_points: '',
-  core_advantages: '',
-  extra_info: '',
-  image_notes: '',
-  target_keywords: '',
+const profileFieldDefinitions = PROFILE_FIELD_DEFINITIONS as ProfileFieldDefinition[];
+const profileArrayFields = new Set(PROFILE_ARRAY_FIELDS as ProfileFieldKey[]);
+
+const fieldPlaceholders: Partial<Record<ProfileFieldKey, string>> = {
+  company_name: '如：成都行乐音改汽车用品有限公司',
+  short_name: '如：行乐音改',
+  industry_category: '如：汽车后市场音响改装与隔音降噪',
+  detailed_address: '省、市、区、道路与门牌号',
+  business_regions: '每行一个区域，如：成都市\n四川省',
+  contact_info: '电话、微信或客服热线',
+  offerings: '每行一个项目，如：无损音响升级\n双层门板隔音\nDSP电脑调音',
+  associated_brands: '每行一个品牌，如：大能隔音\n丹拿Dynaudio',
+  target_audiences: '每行一个客群或车型，如：中高端德系车车主\n家用SUV车主',
+  core_advantages: '每行一条可证明优势，如：IASCA金牌调音师坐镇',
+  trust_endorsements: '每行一条资质、授权、荣誉、成立年限等',
+  user_pain_points: '每行一个痛点，如：原车喇叭音质差\n高速行驶路噪大',
+  proven_cases: '每行一个明确案例，如：丰田汉兰达全车大能隔音施工案例',
+  target_keywords: '每行一个关键词，如：成都汽车音响改装\n成都全车隔音',
+  official_website: '官网链接；没有官网可留空',
+  official_media: '公众号、抖音、小红书等链接或名称',
+  detailed_intro: '公司背景、团队、门店、服务流程、经营理念等',
+  brand_story: '品牌由来、初心、代表事件',
+  current_pain_points: '如：全网声量弱、缺少权威信源、区域认知不足',
+  extra_info: '希望模型记住的业务事实、禁忌表达、品牌语气',
+  image_notes: '门店、施工、案例图片的文字说明',
 };
+
+const fieldRows: Partial<Record<ProfileFieldKey, number>> = {
+  detailed_address: 3,
+  business_regions: 3,
+  offerings: 6,
+  associated_brands: 4,
+  target_audiences: 4,
+  core_advantages: 5,
+  trust_endorsements: 5,
+  user_pain_points: 5,
+  proven_cases: 5,
+  target_keywords: 5,
+  official_media: 3,
+  detailed_intro: 6,
+  brand_story: 4,
+  current_pain_points: 4,
+  extra_info: 4,
+  image_notes: 4,
+};
+
+const sectionDescriptions: Record<string, string> = {
+  基础身份: '建立企业实体和本地化召回锚点。',
+  服务与品牌: '让 AI 明确企业实际提供什么、关联哪些品牌、适合哪些用户。',
+  信任与案例: '沉淀 AI 推荐时可引用的证据、案例和用户痛点。',
+  补充资料: '用于补充官网、自媒体、企业介绍和素材说明。',
+};
+
+const emptyProfile = Object.fromEntries(profileFieldDefinitions.map((field) => [field.key, ''])) as ProfileFormState;
 
 const profileSections: Array<{
   title: string;
@@ -122,58 +167,20 @@ const profileSections: Array<{
     rows?: number;
     required?: boolean;
   }>;
-}> = [
-  {
-    title: '基础身份',
-    description: '建立企业实体，后续会作为 GEO 推荐和品牌召回的基础锚点。',
-    fields: [
-      { key: 'company_name', label: '公司名称/简称', placeholder: '如：成都行乐音改汽车用品有限公司（成都行乐音改）', type: 'input', required: true },
-      { key: 'short_name', label: '常用简称', placeholder: '如：成都行乐音改', type: 'input' },
-      { key: 'industry', label: '所属行业', placeholder: '如：汽车音响改装、隔音工程', type: 'input' },
-      { key: 'main_business', label: '主营业务', placeholder: '如：汽车音响无损升级、全车隔音、DSP 调音', type: 'input' },
-      { key: 'official_website', label: '官方网站', placeholder: '官网链接；没有官网可留空，后续可上传宣传单页/海报', type: 'input' },
-      { key: 'official_media', label: '官方自媒体', placeholder: '公众号、抖音、小红书等链接或名称', type: 'textarea', rows: 3 },
-    ],
-  },
-  {
-    title: '企业介绍',
-    description: '让模型知道企业是谁、为什么可信、适合服务什么用户。',
-    fields: [
-      { key: 'detailed_intro', label: '企业详细介绍', placeholder: '建议不低于 1000 字，可按公司背景、团队、门店、服务流程、经营理念分类整理。', type: 'textarea', rows: 8 },
-      { key: 'brand_story', label: '品牌故事', placeholder: '1000 字内，说明品牌由来、初心、代表事件。', type: 'textarea', rows: 5 },
-      { key: 'current_pain_points', label: '目前痛点/现状', placeholder: '如：新店刚开业口碑不足、不在传统改装商圈内、全网声量弱。', type: 'textarea', rows: 4 },
-      { key: 'core_advantages', label: '核心优势与特色', placeholder: '如：专注无损改装、新能源专属方案、IASCA 认证调音师。', type: 'textarea', rows: 4 },
-    ],
-  },
-  {
-    title: '产品服务',
-    description: '用于生成服务介绍、对比文章、排行榜回答和用户问题答复。',
-    fields: [
-      { key: 'products_services', label: '产品/服务介绍', placeholder: '可按类别整理：入门音响升级、发烧级改装、全车隔音、新能源车型方案等。', type: 'textarea', rows: 6 },
-      { key: 'product_features', label: '产品/服务特点', placeholder: '产品优势、卖点、工艺、材料、售后等，可分类整理。', type: 'textarea', rows: 5 },
-      { key: 'brand_authorization_pricing', label: '品牌授权与客单价', placeholder: '如：代理德国彩虹、MBQ 等中端品牌，主打无损升级，客单价 1500-8000 元。', type: 'textarea', rows: 4 },
-      { key: 'business_regions', label: '业务区域范围', placeholder: '全国/同城/区域，主要经营区域与扩展区域。', type: 'textarea', rows: 3 },
-      { key: 'customer_service_phone', label: '客服办公电话', placeholder: '优先 400 > 固话 > 办公手机', type: 'input' },
-    ],
-  },
-  {
-    title: '用户与背书',
-    description: '帮助模型判断用户场景、信任证据和推荐理由。',
-    fields: [
-      { key: 'user_pain_points', label: '用户痛点', placeholder: '包含用户画像，请详细描述：预算、车型、改装顾虑、音质偏好、决策路径等。', type: 'textarea', rows: 6 },
-      { key: 'trust_endorsements', label: '信任背书', placeholder: '资质、授权、行业影响力、获奖荣誉、平台认证、媒体报道等。', type: 'textarea', rows: 5 },
-      { key: 'cases', label: '行业/客户案例', placeholder: '大客户案例、销售数据、团队人数、专家人数、行业影响力等。', type: 'textarea', rows: 5 },
-      { key: 'extra_info', label: '其他信息补充', placeholder: '任何希望模型记住的业务事实、禁忌表达、品牌语气。', type: 'textarea', rows: 4 },
-    ],
-  },
-  {
-    title: '图片与关键词',
-    description: '上传门店、产品和宣传图片，并录入目标关键词生成长尾语义词。',
-    fields: [
-      { key: 'target_keywords', label: '想推广的关键词', placeholder: '每行一个关键词，例如：\n成都汽车音响改装\n成都靠谱的汽车音响改装店\n成都汽车音响改装店推荐', type: 'textarea', rows: 6 },
-    ],
-  },
-];
+}> = ['基础身份', '服务与品牌', '信任与案例', '补充资料'].map((title) => ({
+  title,
+  description: sectionDescriptions[title] || '',
+  fields: profileFieldDefinitions
+    .filter((field) => field.group === title)
+    .map((field) => ({
+      key: field.key,
+      label: field.label,
+      placeholder: fieldPlaceholders[field.key] || '',
+      type: fieldRows[field.key] ? 'textarea' : 'input',
+      rows: fieldRows[field.key],
+      required: field.required,
+    })),
+}));
 
 export function KnowledgeBase() {
   const [mode, setMode] = useState<KnowledgeMode>('list');
@@ -546,26 +553,26 @@ export function KnowledgeBase() {
                 </div>
                 <div className="min-w-0">
                   <h3 className="truncate font-heading text-[20px] font-bold text-primary transition-colors group-hover:text-secondary">
-                    {profile.short_name || profile.company_name}
+                    {profileFieldText(profile, 'short_name') || profileFieldText(profile, 'company_name')}
                   </h3>
                   <p className="mt-0.5 truncate font-mono text-[11px] uppercase tracking-wider text-on-surface-variant">
-                    {profile.industry || '未填写行业'}
+                    {profileFieldText(profile, 'industry_category') || '未填写行业'}
                   </p>
                 </div>
               </div>
               <span className="max-w-[42%] shrink-0 truncate rounded-full border border-outline-variant/40 bg-surface px-2 py-0.5 text-[10px] font-bold uppercase text-on-surface-variant">
-                {profile.main_business || '企业知识库'}
+                {profileFieldText(profile, 'offerings') || '企业知识库'}
               </span>
             </div>
 
             <p className="line-clamp-4 min-h-[88px] text-[14px] leading-relaxed text-on-surface-variant">
-              {profile.detailed_intro || profile.products_services || '暂无企业介绍。'}
+              {profileFieldText(profile, 'detailed_intro') || profileFieldText(profile, 'offerings') || '暂无企业介绍。'}
             </p>
 
             <div className="mt-auto grid h-[78px] grid-cols-3 gap-2 rounded-2xl border border-outline-variant/10 bg-white/45 px-4 py-3 text-center dark:bg-surface-variant/40">
               <Metric label="知识条目" value={`${profile.entry_count} 条`} />
-              <Metric label="业务区域" value={profile.business_regions || '未填'} />
-              <Metric label="关键词" value={profile.target_keywords ? '已录入' : '待补充'} accent />
+              <Metric label="业务区域" value={profileFieldText(profile, 'business_regions') || '未填'} />
+              <Metric label="关键词" value={profileFieldText(profile, 'target_keywords') ? '已录入' : '待补充'} accent />
             </div>
 
             <div className="flex min-w-0 items-center justify-between gap-3 pt-2 font-mono text-[12px]">
@@ -838,7 +845,7 @@ function KnowledgeDetail({
   setTotal: React.Dispatch<React.SetStateAction<number>>;
   total: number;
 }) {
-  const enterpriseName = profile?.short_name || profile?.company_name || '企业知识库';
+  const enterpriseName = profileFieldText(profile, 'short_name') || profileFieldText(profile, 'company_name') || '企业知识库';
   const healthReport = buildKnowledgeHealthReport(profile, entries, indexStatus);
   const geoStages = buildGeoStagesFromWorkflow(geoWorkflowState)
     ?? buildGeoStagesFromProject(geoProject, geoReports, geoQuestionSets, geoSourceDiscoveries, geoArticleDrafts);
@@ -849,12 +856,15 @@ function KnowledgeDetail({
   const [detailEntry, setDetailEntry] = useState<GeoAgentKnowledgeEntry | null>(null);
   const [isMarkdownOpen, setIsMarkdownOpen] = useState(false);
   const [isEntriesOpen, setIsEntriesOpen] = useState(false);
+  const [retrievalQuery, setRetrievalQuery] = useState('');
+  const [retrievalResults, setRetrievalResults] = useState<GeoAgentKnowledgeEntry[]>([]);
+  const [isTestingRetrieval, setIsTestingRetrieval] = useState(false);
   const uploadInputId = `knowledge-upload-${projectId || 'current'}`;
 
-  const handleDocumentUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleDocumentUploadLegacy = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.currentTarget.files ?? []) as File[];
     event.target.value = '';
-    if (!files.length || !projectId || !window.geoAgent?.createKnowledgeDraft) {
+    if (!files.length || !projectId || !window.geoAgent?.createKnowledgeAsset) {
       return;
     }
     setIsUploading(true);
@@ -878,6 +888,61 @@ function KnowledgeDetail({
     } finally {
       setIsUploading(false);
     }
+  };
+
+  void handleDocumentUploadLegacy;
+
+  const handleDocumentUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.currentTarget.files ?? []) as File[];
+    event.target.value = '';
+    if (!files.length || !projectId || !window.geoAgent?.createKnowledgeAsset) {
+      return;
+    }
+    setIsUploading(true);
+    setUploadError(null);
+    try {
+      const assets = await Promise.all(files.map(async (file) => ({
+        project_id: projectId,
+        filename: file.name,
+        content_type: file.type || null,
+        content_base64: await fileToBase64(file),
+      })));
+      for (const nextAsset of assets) {
+        await window.geoAgent.createKnowledgeAsset(nextAsset);
+      }
+      setUploadError(`已保存 ${files.length} 个源文件，并写入本地检索索引。`);
+      await onRefresh();
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : '文档上传或解析失败。');
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const handleRetrievalTest = async () => {
+    if (!projectId || !retrievalQuery.trim() || !window.geoAgent?.searchKnowledge) {
+      return;
+    }
+    setIsTestingRetrieval(true);
+    try {
+      const response = await window.geoAgent.searchKnowledge(retrievalQuery, projectId, 6);
+      setRetrievalResults(response.entries || []);
+    } finally {
+      setIsTestingRetrieval(false);
+    }
+  };
+
+  const handleReparseAsset = async (assetId: string) => {
+    if (!window.geoAgent?.reparseKnowledgeAsset) return;
+    onStatusChange(await window.geoAgent.reparseKnowledgeAsset(assetId));
+    await onRefresh();
+  };
+
+  const handleDeleteAsset = async (assetId: string) => {
+    if (!window.geoAgent?.deleteKnowledgeAsset) return;
+    if (!window.confirm('确认删除这个源文件及其关联知识片段吗？')) return;
+    onStatusChange(await window.geoAgent.deleteKnowledgeAsset(assetId));
+    await onRefresh();
   };
 
   const handleReindex = async () => {
@@ -992,7 +1057,7 @@ function KnowledgeDetail({
         <SummaryCard icon={FileText} label="已索引" value={`${indexStatus?.indexed ?? 0} 条`} />
         <SummaryCard icon={AlertCircle} label="待处理/失败" value={`${indexStatus?.pending ?? 0}/${indexStatus?.failed ?? 0}`} />
         <SummaryCard icon={Image} label="文档资产" value={`${indexStatus?.asset_count ?? 0} 个`} />
-        <SummaryCard icon={Target} label="关键词状态" value={profile?.target_keywords ? '已录入' : '待补充'} />
+        <SummaryCard icon={Target} label="关键词状态" value={profileFieldText(profile, 'target_keywords') ? '已录入' : '待补充'} />
       </div>
 
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-[0.9fr_1.1fr]">
@@ -1070,7 +1135,7 @@ function KnowledgeDetail({
             {isUploading ? '正在生成更新草稿...' : '上传 Markdown / PDF / Word 文档'}
           </span>
           <span className="mt-2 max-w-2xl text-[13px] leading-relaxed text-on-surface-variant">
-            文档会先生成知识库更新草稿，确认后再写入当前企业并建立 LanceDB 向量索引。
+            文档会先生成知识库更新草稿，确认后再写入当前企业并建立本地 FTS5 全文检索索引。
           </span>
           <input
             accept=".md,.markdown,.txt,.pdf,.doc,.docx,text/markdown,text/plain,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -1090,7 +1155,7 @@ function KnowledgeDetail({
               <h2 className="font-heading text-[18px] font-bold text-primary">本地 RAG 索引</h2>
               <p className="mt-1 truncate text-[12px] leading-relaxed text-on-surface-variant">
                 {indexStatus
-                  ? `${indexStatus.embedding_backend} / ${indexStatus.vector_backend} / ${indexStatus.embedding_model}`
+                  ? `全文检索：${indexStatus.vector_backend} / Embedding：${indexStatus.embedding_backend}`
                   : '等待索引状态'}
               </p>
             </div>
@@ -1112,13 +1177,67 @@ function KnowledgeDetail({
           {indexStatus?.assets && indexStatus.assets.length > 0 && (
             <div className="mt-4 space-y-2">
               {indexStatus.assets.slice(0, 4).map((asset) => (
-                <div className="flex items-center justify-between gap-3 rounded-xl bg-white/55 px-3 py-2 text-[12px] dark:bg-[#1f1f1f]" key={asset.id}>
-                  <span className="min-w-0 truncate font-semibold text-primary">{asset.filename}</span>
-                  <span className={`shrink-0 truncate ${asset.status === 'failed' ? 'text-red-600' : 'text-secondary'}`}>{asset.status}</span>
+                <div className="rounded-xl bg-white/55 px-3 py-2 text-[12px] dark:bg-[#1f1f1f]" key={asset.id}>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="min-w-0 truncate font-semibold text-primary">{asset.filename}</span>
+                    <span className={`shrink-0 truncate ${asset.status === 'failed' ? 'text-red-600' : 'text-secondary'}`}>
+                      {asset.status} / {asset.embedding_status || 'not-configured'}
+                    </span>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-on-surface-variant">
+                    <span>{formatFileSize(asset.file_size || 0)}</span>
+                    <div className="flex gap-2">
+                      <button className="font-bold text-secondary hover:opacity-80" onClick={() => handleReparseAsset(asset.id)} type="button">
+                        重新解析
+                      </button>
+                      <button className="font-bold text-red-600 hover:opacity-80" onClick={() => handleDeleteAsset(asset.id)} type="button">
+                        删除
+                      </button>
+                    </div>
+                  </div>
                 </div>
               ))}
             </div>
           )}
+          <div className="mt-4 rounded-xl bg-white/55 p-3 dark:bg-[#1f1f1f]">
+            <div className="flex gap-2">
+              <input
+                className="min-w-0 flex-1 rounded-lg border border-outline-variant/40 bg-white px-3 py-2 text-[12px] text-primary outline-none focus:border-secondary dark:bg-surface"
+                onChange={(event) => setRetrievalQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') handleRetrievalTest();
+                }}
+                placeholder="输入一句问题测试混合检索"
+                value={retrievalQuery}
+              />
+              <button
+                className="shrink-0 rounded-lg bg-primary px-3 py-2 text-[12px] font-bold text-on-primary disabled:opacity-50"
+                disabled={isTestingRetrieval || !retrievalQuery.trim()}
+                onClick={handleRetrievalTest}
+                type="button"
+              >
+                {isTestingRetrieval ? '检索中' : '测试'}
+              </button>
+            </div>
+            {retrievalResults.length > 0 && (
+              <div className="mt-3 space-y-2">
+                {retrievalResults.map((entry) => (
+                  <button
+                    className="block w-full rounded-lg bg-white/70 p-2 text-left text-[12px] hover:bg-white dark:bg-surface-variant/45"
+                    key={entry.id}
+                    onClick={() => setDetailEntry(entry)}
+                    type="button"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="min-w-0 truncate font-bold text-primary">{entry.source_filename || entry.title}</span>
+                      <span className="shrink-0 text-secondary">{entry.retrieval_source || 'fts'} {entry.score ? entry.score.toFixed(2) : ''}</span>
+                    </div>
+                    <p className="mt-1 line-clamp-2 text-on-surface-variant">{entry.content}</p>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </section>
 
@@ -1221,7 +1340,7 @@ function DeleteProfileDialog({
           <div className="min-w-0">
             <h2 className="font-heading text-[22px] font-bold text-primary">删除企业知识库</h2>
             <p className="mt-2 text-[14px] leading-relaxed text-on-surface-variant">
-              此操作会永久删除 <strong className="text-primary">{profile.short_name || profile.company_name}</strong> 的企业资料和全部知识条目，无法撤销。
+              此操作会永久删除 <strong className="text-primary">{profileFieldText(profile, 'short_name') || profileFieldText(profile, 'company_name')}</strong> 的企业资料和全部知识条目，无法撤销。
             </p>
           </div>
         </div>
@@ -1538,7 +1657,7 @@ function buildKnowledgeHealthReport(
     if (!fields.length) {
       return 0;
     }
-    const filled = fields.filter((field) => hasText(profileData[field])).length;
+    const filled = fields.filter((field) => hasText(profileFieldText(profileData, String(field)))).length;
     return Math.round((filled / fields.length) * 100);
   };
 
@@ -1546,27 +1665,28 @@ function buildKnowledgeHealthReport(
     makeDimension({
       key: 'identity',
       label: '基础资料完整度',
-      score: scoreFieldGroup(['company_name', 'short_name', 'industry', 'main_business', 'business_regions', 'customer_service_phone']),
+      score: scoreFieldGroup(['company_name', 'short_name', 'industry_category', 'detailed_address', 'business_regions', 'contact_info']),
       weight: 0.18,
       reason: '企业实体、行业、业务和区域是 GEO 召回的基础锚点。',
       missingItems: missingLabels(profileData, [
         ['company_name', '公司名称'],
-        ['industry', '所属行业'],
-        ['main_business', '主营业务'],
+        ['industry_category', '所属行业分类'],
+        ['detailed_address', '详细经营地址'],
         ['business_regions', '业务区域'],
+        ['contact_info', '联系方式'],
       ]),
       recommendedAction: '补齐公司身份、主营业务和服务区域。',
     }),
     makeDimension({
       key: 'service',
       label: '产品/服务结构化程度',
-      score: scoreFieldGroup(['products_services', 'product_features', 'brand_authorization_pricing', 'core_advantages']),
+      score: scoreFieldGroup(['offerings', 'associated_brands', 'target_audiences', 'core_advantages']),
       weight: 0.16,
       reason: '产品分类、卖点和价格区间决定后续文章与榜单回答的可信度。',
       missingItems: missingLabels(profileData, [
-        ['products_services', '产品/服务介绍'],
-        ['product_features', '产品/服务特点'],
-        ['brand_authorization_pricing', '品牌授权与客单价'],
+        ['offerings', '产品与服务项目'],
+        ['associated_brands', '关联/代理品牌'],
+        ['target_audiences', '目标客群/适用车型'],
         ['core_advantages', '核心优势'],
       ]),
       recommendedAction: '按服务分类补充卖点、套餐、价格和差异化优势。',
@@ -1587,12 +1707,12 @@ function buildKnowledgeHealthReport(
     makeDimension({
       key: 'eeat',
       label: 'EEAT 信任背书',
-      score: scoreFieldGroup(['trust_endorsements', 'cases', 'official_website', 'official_media']),
+      score: scoreFieldGroup(['trust_endorsements', 'proven_cases', 'official_website', 'official_media']),
       weight: 0.18,
       reason: '资质、授权、案例和官方信源是进入推荐榜单的重要支撑。',
       missingItems: missingLabels(profileData, [
         ['trust_endorsements', '信任背书'],
-        ['cases', '行业/客户案例'],
+        ['proven_cases', '客户案例'],
         ['official_website', '官方网站'],
         ['official_media', '官方自媒体'],
       ]),
@@ -1601,32 +1721,32 @@ function buildKnowledgeHealthReport(
     makeDimension({
       key: 'keywords',
       label: '关键词与长尾词覆盖',
-      score: Math.min(100, (keywordCount(profileData.target_keywords) >= 3 ? 70 : keywordCount(profileData.target_keywords) * 25) + (hasText(profileData.generated_long_tail_keywords) ? 30 : 0)),
+      score: Math.min(100, (keywordCount(profileFieldText(profileData, 'target_keywords')) >= 3 ? 70 : keywordCount(profileFieldText(profileData, 'target_keywords')) * 25) + (hasText(profileData.generated_long_tail_keywords) ? 30 : 0)),
       weight: 0.14,
       reason: '目标关键词和长尾问题决定阶段二自查与阶段五内容矩阵方向。',
       missingItems: [
-        ...(keywordCount(profileData.target_keywords) > 0 ? [] : ['目标关键词']),
+        ...(keywordCount(profileFieldText(profileData, 'target_keywords')) > 0 ? [] : ['目标关键词']),
         ...(hasText(profileData.generated_long_tail_keywords) ? [] : ['长尾语义词']),
       ],
       recommendedAction: '补充地区 + 行业 + 主体关键词，并生成长尾用户问题。',
     }),
     makeDimension({
       key: 'rag',
-      label: 'RAG 向量化状态',
+      label: 'RAG 检索状态',
       score: buildRagScore(entries, indexStatus),
       weight: 0.12,
-      reason: '知识条目完成向量化后，智能助手和文章生成才能稳定引用企业资料。',
+      reason: '知识条目写入本地全文检索索引后，智能助手和文章生成才能稳定引用企业资料。',
       missingItems: [
         ...(entries.length > 0 ? [] : ['知识条目']),
         ...((indexStatus?.failed ?? 0) > 0 ? ['失败条目'] : []),
         ...((indexStatus?.pending ?? 0) > 0 ? ['待处理条目'] : []),
       ],
-      recommendedAction: '上传资料并重建索引，确保条目完成向量化。',
+      recommendedAction: '上传资料并重建索引，确保条目进入本地检索库。',
     }),
     makeDimension({
       key: 'geo_ready',
       label: '排行榜问题池准备度',
-      score: Math.round((scoreFieldGroup(['company_name', 'industry', 'main_business', 'detailed_intro', 'products_services', 'trust_endorsements', 'target_keywords']) + buildRagScore(entries, indexStatus)) / 2),
+      score: Math.round((scoreFieldGroup(['company_name', 'industry_category', 'detailed_address', 'offerings', 'trust_endorsements', 'target_keywords']) + buildRagScore(entries, indexStatus)) / 2),
       weight: 0.08,
       reason: '阶段二需要企业背景、关键词和可检索资料共同支撑。',
       missingItems: [],
@@ -1746,9 +1866,9 @@ function buildGeoStagesFromProject(
       status: deepseekStageFourStatus.status,
       description: deepseekStageFourStatus.description,
     },
-    { label: '阶段五：排行榜文章生成', status: '待开发', description: '咨询类和测评类支撑内容完成后，再生成排行榜/推荐类文章。' },
-    { label: '阶段六：平台发稿分发', status: '待开发', description: '后续接入媒体渠道、发稿记录和发布确认。' },
-    { label: '阶段七：平台规则进化', status: '待开发', description: '后续根据各平台收录结果更新规则和渠道积分。' },
+    { label: '阶段五：稿件管理与发布', status: '待启动', description: '校对稿件、生成 OSS 预览、选择媒体投递并同步订单状态。' },
+    { label: '阶段六：AI 推荐可见性检测', status: '待启动', description: '有已发布文章 URL 后自动检测核心问题，并每 10 分钟复查。' },
+    { label: '阶段七：反思优化/自动学习', status: '待启动', description: '仅在文章被 AI 推荐或排名上升时生成待确认学习规则。' },
   ];
 }
 
@@ -1768,7 +1888,7 @@ function buildGeoStagesFromWorkflow(workflow: GeoAgentWorkflowState | null): Geo
     if (!platformState) {
       return;
     }
-    ['stage_2', 'stage_3', 'stage_4', 'stage_5'].forEach((stageKey) => {
+    ['stage_2', 'stage_3', 'stage_4', 'stage_5', 'stage_6', 'stage_7'].forEach((stageKey) => {
       const stage = platformState.stages[stageKey];
       if (stage) {
         stages.push({
@@ -1779,10 +1899,6 @@ function buildGeoStagesFromWorkflow(workflow: GeoAgentWorkflowState | null): Geo
       }
     });
   });
-  stages.push(
-    { label: '阶段六：平台发稿分发', status: '待开发', description: '排行榜文章完成后再接入发稿记录和发布确认。' },
-    { label: '阶段七：平台规则进化', status: '待开发', description: '根据各平台引用验证结果更新规则和渠道积分。' },
-  );
   return stages;
 }
 
@@ -1873,42 +1989,12 @@ function formatCurrentPhase(phase?: string | null): string {
 }
 
 function buildProfileMarkdown(profile: GeoAgentEnterpriseProfile): string {
-  const sections: Array<[string, Array<[string, unknown]>]> = [
-    ['基础信息', [
-      ['公司名称', profile.company_name],
-      ['公司简称', profile.short_name],
-      ['所属行业', profile.industry],
-      ['主营业务', profile.main_business],
-      ['官方网站', profile.official_website],
-      ['官方自媒体', profile.official_media],
-      ['客服办公电话', profile.customer_service_phone],
-    ]],
-    ['企业介绍', [
-      ['企业详细介绍', profile.detailed_intro],
-      ['品牌故事', profile.brand_story],
-      ['目前痛点/现状', profile.current_pain_points],
-      ['核心优势与特色', profile.core_advantages],
-    ]],
-    ['产品服务', [
-      ['产品/服务介绍', profile.products_services],
-      ['产品/服务特点', profile.product_features],
-      ['品牌授权与客单价', profile.brand_authorization_pricing],
-    ]],
-    ['用户痛点与 EEAT 背书', [
-      ['用户痛点', profile.user_pain_points],
-      ['信任背书', profile.trust_endorsements],
-      ['行业/客户案例', profile.cases],
-    ]],
-    ['区域、关键词与素材', [
-      ['业务区域范围', profile.business_regions],
-      ['目标关键词', profile.target_keywords],
-      ['生成长尾语义词', profile.generated_long_tail_keywords],
-      ['图片内容', profile.image_notes],
-      ['其他信息补充', profile.extra_info],
-    ]],
-  ];
+  const sections = profileSections.map((section) => [
+    section.title,
+    section.fields.map((field) => [field.label, profileFieldText(profile, field.key)] as [string, unknown]),
+  ] as [string, Array<[string, unknown]>]);
   return [
-    `# ${profile.short_name || profile.company_name}企业知识库`,
+    `# ${profileFieldText(profile, 'short_name') || profileFieldText(profile, 'company_name')}企业知识库`,
     '',
     ...sections.flatMap(([title, fields]) => [
       `## ${title}`,
@@ -1919,7 +2005,7 @@ function buildProfileMarkdown(profile: GeoAgentEnterpriseProfile): string {
 }
 
 function missingLabels(profile: GeoAgentEnterpriseProfile, fields: Array<[keyof GeoAgentEnterpriseProfile, string]>) {
-  return fields.filter(([field]) => !hasText(profile[field])).map(([, label]) => label);
+  return fields.filter(([field]) => !hasText(profileFieldText(profile, String(field)))).map(([, label]) => label);
 }
 
 function hasText(value: unknown) {
@@ -1979,38 +2065,25 @@ function statusClassName(status: KnowledgeHealthStatus) {
 
 function compactProfile(profile: ProfileFormState & { project_id: string }): GeoAgentEnterpriseProfileInput {
   return Object.entries(profile).reduce((acc, [key, value]) => {
-    const normalized = typeof value === 'string' ? value.trim() : value;
-    if (normalized) {
-      return { ...acc, [key]: normalized };
+    if (key === 'project_id') {
+      return { ...acc, project_id: value };
     }
-    return acc;
+    const normalized = typeof value === 'string' ? value.trim() : value;
+    if (!normalized && key !== 'company_name') {
+      return acc;
+    }
+    const fieldValue = profileArrayFields.has(key as ProfileFieldKey)
+      ? String(normalized || '').split(/[\n,，、;；|]+/).map((item) => item.trim()).filter(Boolean)
+      : String(normalized || '').trim();
+    return { ...acc, [key]: toProfileEvidenceField(fieldValue) };
   }, {} as GeoAgentEnterpriseProfileInput);
 }
 
 function profileToForm(profile: GeoAgentEnterpriseProfile): ProfileFormState {
-  return {
-    company_name: profile.company_name ?? '',
-    short_name: profile.short_name ?? '',
-    industry: profile.industry ?? '',
-    main_business: profile.main_business ?? '',
-    official_website: profile.official_website ?? '',
-    official_media: profile.official_media ?? '',
-    detailed_intro: profile.detailed_intro ?? '',
-    brand_story: profile.brand_story ?? '',
-    products_services: profile.products_services ?? '',
-    product_features: profile.product_features ?? '',
-    user_pain_points: profile.user_pain_points ?? '',
-    trust_endorsements: profile.trust_endorsements ?? '',
-    brand_authorization_pricing: profile.brand_authorization_pricing ?? '',
-    cases: profile.cases ?? '',
-    business_regions: profile.business_regions ?? '',
-    customer_service_phone: profile.customer_service_phone ?? '',
-    current_pain_points: profile.current_pain_points ?? '',
-    core_advantages: profile.core_advantages ?? '',
-    extra_info: profile.extra_info ?? '',
-    image_notes: profile.image_notes ?? '',
-    target_keywords: profile.target_keywords ?? '',
-  };
+  return Object.fromEntries(profileFieldDefinitions.map((field) => [
+    field.key,
+    profileFieldText(profile, field.key),
+  ])) as ProfileFormState;
 }
 
 function buildImageNotes(images: UploadedImageAsset[]) {

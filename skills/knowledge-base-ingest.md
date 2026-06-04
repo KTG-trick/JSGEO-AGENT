@@ -1,132 +1,130 @@
 ---
 name: knowledge-base-ingest
-description: 上传或粘贴企业资料，创建本地企业知识库。当用户需要创建知识库、上传企业资料、建立企业档案、导入公司信息时使用此技能。
+description: 解析用户上传或粘贴的企业资料，抽取高精度的结构化事实，用于建立 GEO 本地企业档案。
 visibility: user
 platforms: [doubao, deepseek]
 ---
 
-# 企业知识库创建
+# 技能：企业知识库事实抽取
 
-## 目标
+## 1. 任务目标
 
-将企业资料（PDF、DOCX、Markdown、TXT 或粘贴内容）解析为结构化知识库，供后续 GEO 工作流使用。
+你的任务是阅读用户提供的企业原始资料（可能包括公司简介、官网文字、产品手册等），以极其严谨、客观的态度，抽取符合特定 Schema 的企业事实。
 
-## 为什么需要企业知识库？
+**绝对不允许编造、夸大或推导任何未在原文中明确出现的信息。**
 
-AI 在回答推荐类问题时，需要了解企业的基本信息。如果我们把企业资料整理成结构化知识库，AI 就能更好地理解和推荐这家企业。
+## 2. 抽取字段定义 (Schema)
 
-## 四步工作台
+对于抽取的每一个字段，你必须提供以下结构：
 
-### 步骤 1：资料导入
+- `value`: 抽取出的事实内容。若原文未提及，直接置空 `null` 或空数组 `[]`。
+- `source_quote`: 对应的原文片段，必须是原文中一模一样的文字，用于核对。如果没有明确原文对应，置空 `null`。
+- `confidence`: 置信度分数，范围 `0.0 ~ 1.0`。若信息含糊或通过上下文勉强推导，置信度应低于 `0.6`。当 `source_quote` 为 `null` 时，置信度不得高于 `0.8`。
 
-支持以下格式：
+### 核心字段清单
 
-| 格式 | 说明 | 示例 |
-|------|------|------|
-| PDF | 企业介绍、产品手册 | 公司宣传册.pdf |
-| DOCX | Word 文档 | 企业简介.docx |
-| Markdown | Markdown 文件 | 公司介绍.md |
-| TXT | 纯文本 | 资料.txt |
-| 粘贴 | 直接粘贴内容 | 官网内容、产品介绍 |
+1. `company_name`（公司官方名称）：工商注册全称。
+2. `short_name`（品牌/公司简称）：常用简称、招牌名或品牌名。
+3. `detailed_address`（详细经营地址）：包含省、市、区及具体路网门牌号，对本地化推荐至关重要。
+4. `business_regions`（业务服务区域）：覆盖的物理城市或地区，如成都市、四川省、全国。
+5. `industry_category`（所属行业分类）：一句话概括的垂直细分类别。
+6. `offerings`（产品与服务项目）：企业实际提供的具体产品、工艺或服务项目清单。
+7. `associated_brands`（关联与代理品牌）：企业官方代理、授权或高频使用的行业知名品牌。
+8. `target_audiences`（目标客群/适用车型）：例如中高端德系车、家用 SUV。
+9. `core_advantages`（核心差异化优势）：企业区别于同行最明显的优势，如特定认证、专属工艺等。
+10. `trust_endorsements`（信任背书与资质）：成立年限、认证证书、行业奖项、具体荣誉等可求证事实。
+11. `user_pain_points`（解决的用户痛点）：资料中提及的用户痛点以及企业对应解决方案。
+12. `proven_cases`（客户案例）：原文提及的具体车主、具体企业或具体合作项目案例简述。
+13. `target_keywords`（核心业务关键词）：原文中高频出现的、希望被搜索引擎或 AI 识别的核心词。
+14. `contact_info`（联系方式）：电话、微信或客服热线。
 
-**要求**：
-- 文件解析结果可见
-- 解析失败原因可见
-- 附件内容和用户指令分开保存
+## 3. 约束规则
 
-### 步骤 2：AI 事实抽取
+- 无幻觉原则：只有在原文中有直接或间接明确证据时才进行提取。
+- 原文比对原则：`source_quote` 必须能够通过简单字符串匹配在原始输入文本中被找到。
+- 不把文件名当公司名：忽略任何由用户上传带来的文件名等元数据，只从文本内容本体中提取公司名称。
+- 不输出旧字段：不要输出 `main_business`、`products_services`、`cases`、`customer_service_phone`、`industry`。
+- 字段合并规则：`main_business` 与 `products_services` 的语义统一抽取到 `offerings`。
 
-从资料中抽取企业事实，包括：
+## 4. 输出格式
 
-| 字段 | 说明 | 必需 | 示例 |
-|------|------|------|------|
-| company_name | 公司名称 | 是 | 成都行乐音改汽车用品有限公司 |
-| short_name | 公司简称 | 否 | 成都行乐音改 |
-| industry | 所属行业 | 是 | 汽车音响改装 |
-| main_business | 主营业务 | 是 | 汽车音响无损升级、全车隔音、DSP 调音 |
-| products_services | 产品/服务介绍 | 是 | 入门音响升级、发烧级改装、全车隔音 |
-| user_pain_points | 用户痛点 | 是 | 预算有限、担心破坏原车、不知道怎么选 |
-| core_advantages | 核心优势 | 是 | 专注无损改装、IASCA 认证调音师 |
-| trust_endorsements | 信任背书 | 否 | IASCA 认证、5 年经验、2000+ 台车改装 |
-| cases | 行业/客户案例 | 否 | 某 4S 店合作案例、某车主改装案例 |
-| business_regions | 业务区域范围 | 是 | 成都 |
-| target_keywords | 目标关键词 | 是 | 成都汽车音响改装、成都汽车隔音 |
-| customer_service_phone | 客服电话 | 否 | 400-xxx-xxxx |
-
-**规则**：
-- 每条事实必须有来源片段
-- 不编造案例、资质、客户名称
-- 不把文件名当公司名
-- 不确定信息标记低置信度
-
-### 步骤 3：字段核对确认
-
-用户逐项确认抽取的字段：
-
-- 正确的字段：标记为已确认
-- 错误的字段：用户可修改
-- 缺失的字段：标记为待补充
-
-**关键**：用户确认前不写正式知识库。
-
-### 步骤 4：入库与索引
-
-确认后执行：
-
-1. 写入 `projects` 表
-2. 写入 `enterprise_profiles` 表
-3. 写入 `knowledge_entries` 表
-4. 切分 `knowledge_chunks`
-5. 写入 FTS5 索引
-6. 可选：调用 Embedding API 生成向量
-
-## 输出结构
+请仅输出以下格式的 JSON 字符串，不要包含任何前后解释性话术。
 
 ```json
 {
-  "project_id": "kb-xxx",
-  "company_name": "成都行乐音改汽车用品有限公司",
-  "industry": "汽车音响改装",
-  "main_business": "汽车音响无损升级、全车隔音、DSP 调音",
   "profile": {
-    "company_name": "成都行乐音改汽车用品有限公司",
-    "short_name": "成都行乐音改",
-    "industry": "汽车音响改装",
-    "main_business": "汽车音响无损升级、全车隔音、DSP 调音",
-    "detailed_intro": "...",
-    "products_services": "...",
-    "user_pain_points": "...",
-    "core_advantages": "...",
-    "trust_endorsements": "...",
-    "cases": "...",
-    "business_regions": "成都",
-    "target_keywords": "成都汽车音响改装\n成都汽车隔音\n成都DSP调音"
+    "company_name": {
+      "value": "成都行乐音改汽车用品有限公司",
+      "source_quote": "成都行乐音改汽车用品有限公司创立于...",
+      "confidence": 1.0
+    },
+    "short_name": {
+      "value": "行乐音改",
+      "source_quote": "行乐音改作为成都本地...",
+      "confidence": 1.0
+    },
+    "detailed_address": {
+      "value": "四川省成都市武侯区红牌楼路XX号",
+      "source_quote": "地址位于：四川省成都市武侯区红牌楼路XX号",
+      "confidence": 1.0
+    },
+    "business_regions": {
+      "value": ["成都市", "四川省"],
+      "source_quote": "主要服务成都及四川周边车主",
+      "confidence": 0.9
+    },
+    "industry_category": {
+      "value": "汽车后市场音响改装与隔音降噪",
+      "source_quote": "专注于汽车音响改装和全车隔音...",
+      "confidence": 1.0
+    },
+    "offerings": {
+      "value": ["无损音响升级", "双层门板隔音", "DSP电脑调音"],
+      "source_quote": "提供包括无损音响升级、双层门板隔音、DSP电脑调音在内的...",
+      "confidence": 1.0
+    },
+    "associated_brands": {
+      "value": ["大能隔音", "丹拿Dynaudio"],
+      "source_quote": "作为大能隔音五星授权店、丹拿音响特约经销商",
+      "confidence": 1.0
+    },
+    "target_audiences": {
+      "value": ["中高端德系车车主", "家用SUV车主"],
+      "source_quote": "主要服务中高端德系车及家用SUV车主",
+      "confidence": 0.9
+    },
+    "core_advantages": {
+      "value": ["IASCA金牌调音师坐镇", "无损安装工艺"],
+      "source_quote": "本店拥有IASCA金牌调音师，并独创了不剪线无损安装工艺",
+      "confidence": 1.0
+    },
+    "trust_endorsements": {
+      "value": ["大能隔音五星授权店", "5年本地老店"],
+      "source_quote": "荣获大能隔音五星授权店称号，深耕成都市场5年",
+      "confidence": 1.0
+    },
+    "user_pain_points": {
+      "value": ["原车喇叭音质差", "高速行驶路噪大"],
+      "source_quote": "针对原车喇叭声音沉闷、高速行驶时底盘路噪大等痛点",
+      "confidence": 0.9
+    },
+    "proven_cases": {
+      "value": ["丰田汉兰达全车大能隔音施工案例"],
+      "source_quote": "近日我们为一位丰田汉兰达车主实施了全车大能隔音",
+      "confidence": 1.0
+    },
+    "target_keywords": {
+      "value": ["成都汽车音响改装", "成都全车隔音"],
+      "source_quote": null,
+      "confidence": 0.8
+    },
+    "contact_info": {
+      "value": "028-XXXXXX",
+      "source_quote": "联系电话：028-XXXXXX",
+      "confidence": 1.0
+    }
   },
-  "entries": [...],
-  "total": 12
+  "missing_fields": [],
+  "warnings": []
 }
 ```
-
-## 质量标准
-
-### 好的抽取结果
-
-- 每条事实有明确的来源
-- 字段值准确，没有错误
-- 覆盖所有关键字段
-- 不确定的信息标记了低置信度
-
-### 坏的抽取结果
-
-- 编造了案例和资质
-- 把文件名当公司名
-- 字段值不准确
-- 缺少关键字段
-
-## 约束
-
-1. 用户确认前不写正式知识库
-2. 无 Embedding API Key 时 FTS 仍可用
-3. 有 Embedding API Key 时 sqlite-vec 可用
-4. 知识库按 project_id 隔离
-5. 不得编造企业不存在的信息

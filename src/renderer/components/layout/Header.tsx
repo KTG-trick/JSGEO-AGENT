@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Bell, Globe, Building2, ChevronDown, Menu, Check, Trash2 } from 'lucide-react';
+import { Bell, Globe, Building2, ChevronDown, Check, Trash2 } from 'lucide-react';
 import { useEnterprise } from '../../context/EnterpriseContext';
 import { cn } from '../../lib/utils';
 import { ViewState } from '../../types';
@@ -56,10 +56,9 @@ function conversationPreview(conversation: GeoAgentConversationSummary) {
 interface HeaderProps {
   currentView: ViewState;
   isSidebarCollapsed: boolean;
-  onToggleSidebar: () => void;
 }
 
-export function Header({ currentView, isSidebarCollapsed, onToggleSidebar }: HeaderProps) {
+export function Header({ currentView, isSidebarCollapsed }: HeaderProps) {
   const { currentEnterprise, hasEnterprises } = useEnterprise();
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [publicConversations, setPublicConversations] = useState<GeoAgentConversationSummary[]>([]);
@@ -213,17 +212,6 @@ export function Header({ currentView, isSidebarCollapsed, onToggleSidebar }: Hea
       "fixed top-[40px] w-full h-8 z-40 flex items-center px-6 transition-[padding] duration-300",
       isSidebarCollapsed ? "md:pl-4" : "md:pl-[240px]"
     )}>
-      {isSidebarCollapsed && (
-        <button
-          aria-label="展开侧边栏"
-          className="mr-2 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-on-surface-variant transition-colors hover:bg-surface-container-low hover:text-primary"
-          onClick={onToggleSidebar}
-          title="展开侧边栏"
-          type="button"
-        >
-          <Menu className="h-4 w-4" />
-        </button>
-      )}
       <div className="relative flex min-w-0 items-center gap-2 ml-2 md:ml-3" ref={historyRef}>
             <span className="hidden text-[12px] font-bold text-primary sm:inline">
               鲸杉GEO-Agent

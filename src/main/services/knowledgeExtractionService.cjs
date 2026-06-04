@@ -7,61 +7,34 @@ const {
   responsesStream,
 } = require('./llmGateway.cjs');
 const { getTaskPolicy } = require('./modelPolicyService.cjs');
+const {
+  fieldText,
+  fieldValue,
+  normalizeText,
+  toEvidenceField,
+} = require('./profileFieldService.cjs');
+const { getSkill } = require('./skillService.cjs');
+const {
+  PROFILE_ARRAY_FIELDS,
+  PROFILE_FIELD_KEYS,
+  REQUIRED_PROFILE_FIELDS,
+} = require('../../shared/profileSchema.cjs');
 
 const UNKNOWN_COMPANY_NAME = '待确认企业名称';
 
-const REQUIRED_FIELDS = [
-  ['company_name', '企业名称'],
-  ['main_business', '主营业务'],
-  ['products_services', '产品服务'],
-  ['user_pain_points', '用户痛点'],
-  ['core_advantages', '核心优势'],
-  ['trust_endorsements', '信任背书'],
-  ['cases', '案例'],
-  ['target_keywords', '目标关键词'],
-];
-
-const OPTIONAL_PROFILE_FIELDS = [
-  'short_name',
-  'industry',
-  'official_website',
-  'official_media',
-  'detailed_intro',
-  'brand_story',
-  'product_features',
-  'brand_authorization_pricing',
-  'business_regions',
-  'customer_service_phone',
-  'current_pain_points',
-  'extra_info',
-  'image_notes',
-  'generated_long_tail_keywords',
-];
-
-function normalizeText(value) {
-  return String(value || '').replace(/\r\n/g, '\n').trim();
-}
+const ARRAY_FIELDS = new Set(PROFILE_ARRAY_FIELDS);
+const PROFILE_FIELDS = PROFILE_FIELD_KEYS;
+const REQUIRED_FIELDS = REQUIRED_PROFILE_FIELDS;
 
 function clamp(value, min = 0, max = 1) {
   const number = Number(value);
-  if (Number.isNaN(number)) {
-    return min;
-  }
+  if (Number.isNaN(number)) return min;
   return Math.min(max, Math.max(min, number));
-}
-
-function compactObject(value) {
-  return Object.fromEntries(
-    Object.entries(value || {}).filter(([, entryValue]) => entryValue !== undefined && entryValue !== null && String(entryValue).trim() !== '')
-  );
 }
 
 function truncateMiddle(text, maxLength = 18000) {
   const value = normalizeText(text);
-  if (value.length <= maxLength) {
-    return value;
-  }
-
+  if (value.length <= maxLength) return value;
   const head = Math.floor(maxLength * 0.7);
   const tail = maxLength - head;
   return `${value.slice(0, head)}\n\n...[中间内容已裁剪]...\n\n${value.slice(-tail)}`;
@@ -77,7 +50,7 @@ function buildCorpus(documents = [], message = '') {
   documents
     .filter((document) => document.status === 'parsed' && normalizeText(document.text))
     .forEach((document, index) => {
-      sections.push(`## 文件 ${index + 1}: ${document.filename}\n${truncateMiddle(document.text, 8000)}`);
+      sections.push(`## 文件 ${index + 1}\n${truncateMiddle(document.text, 8000)}`);
     });
 
   return truncateMiddle(sections.join('\n\n'), 22000);
@@ -92,105 +65,127 @@ function validateCorpus(corpus) {
 function createSystemPrompt() {
   return [
     '你是 GEO-Agent Studio 的企业知识库事实抽取器。',
-    '你的任务是从用户提供的企业资料原文中抽取事实，生成可人工确认的企业知识库草稿。',
-    '必须遵守：',
-    '1. 只抽取原文明确出现或可直接归纳的信息，不得编造案例、资质、电话、官网、价格、客户名称。',
-    '2. 不要把“请帮我创建知识库”“已上传附件”“模板标题”等用户指令当作企业事实。',
-    '3. 每条 fact 必须包含 source_file 和 quote，quote 必须是原文片段或高度贴近原文的短片段。',
-    '4. 如果关键信息缺失，把字段放入 missing_fields 和 warnings，不要猜。',
-    '5. 只返回 JSON，不要 Markdown，不要解释。',
+    '你的任务是阅读用户提供的企业原始资料，以极其严谨、客观的态度抽取结构化企业事实。',
+    '绝对不允许编造、夸大或推导任何未在原文中明确出现的信息。',
+    '每个字段必须是 { value, source_quote, confidence }。',
+    'source_quote 必须是原文中一模一样的文字片段；没有明确原文对应时必须为 null。',
+    'source_quote 为 null 时 confidence 不得高于 0.8。',
+    '不要把文件名、上传说明、用户指令、模板标题当作公司名或企业事实。',
+    '只返回合法 JSON 对象，不要 Markdown，不要解释。',
   ].join('\n');
 }
 
 function createUserPrompt(corpus) {
   return JSON.stringify({
-    task: 'extract_enterprise_knowledge_draft',
+    task: 'extract_enterprise_knowledge_profile',
     output_schema: {
-      facts: [
-        {
-          field: 'company_name | main_business | products_services | user_pain_points | core_advantages | trust_endorsements | cases | target_keywords | official_website | industry | business_regions | other',
-          label: '中文字段名',
-          value: '抽取到的事实内容',
-          source_file: '来源文件名或用户说明',
-          quote: '支持该事实的原文片段',
-          confidence: 0.0,
-        },
-      ],
       profile: {
-        company_name: '',
-        short_name: '',
-        industry: '',
-        main_business: '',
-        official_website: '',
-        official_media: '',
-        detailed_intro: '',
-        brand_story: '',
-        products_services: '',
-        product_features: '',
-        user_pain_points: '',
-        trust_endorsements: '',
-        brand_authorization_pricing: '',
-        cases: '',
-        business_regions: '',
-        customer_service_phone: '',
-        current_pain_points: '',
-        core_advantages: '',
-        extra_info: '',
-        target_keywords: '',
+        company_name: { value: null, source_quote: null, confidence: 0 },
+        short_name: { value: null, source_quote: null, confidence: 0 },
+        detailed_address: { value: null, source_quote: null, confidence: 0 },
+        business_regions: { value: [], source_quote: null, confidence: 0 },
+        industry_category: { value: null, source_quote: null, confidence: 0 },
+        offerings: { value: [], source_quote: null, confidence: 0 },
+        associated_brands: { value: [], source_quote: null, confidence: 0 },
+        target_audiences: { value: [], source_quote: null, confidence: 0 },
+        core_advantages: { value: [], source_quote: null, confidence: 0 },
+        trust_endorsements: { value: [], source_quote: null, confidence: 0 },
+        user_pain_points: { value: [], source_quote: null, confidence: 0 },
+        proven_cases: { value: [], source_quote: null, confidence: 0 },
+        target_keywords: { value: [], source_quote: null, confidence: 0 },
+        contact_info: { value: null, source_quote: null, confidence: 0 },
       },
       missing_fields: ['缺失字段中文名'],
       warnings: ['需要人工注意的问题'],
     },
+    field_definitions: {
+      company_name: '工商注册全称或资料正文中的公司官方名称。',
+      short_name: '常用简称、招牌名或品牌名。',
+      detailed_address: '包含省、市、区及具体路网门牌号的经营地址。',
+      business_regions: '覆盖的物理城市或地区。',
+      industry_category: '一句话概括的垂直细分类别。',
+      offerings: '企业实际提供的具体产品、工艺或服务项目清单。',
+      associated_brands: '企业官方代理、授权或高频使用的行业知名品牌。',
+      target_audiences: '目标客群、适用车型、适用行业或典型用户画像。',
+      core_advantages: '企业区别于同行的可证明优势。',
+      trust_endorsements: '成立年限、认证证书、行业奖项、具体荣誉等事实。',
+      user_pain_points: '资料中提及的用户痛点以及该企业对应的解决方案。',
+      proven_cases: '原文提及的具体车主、企业或合作项目案例。',
+      target_keywords: '原文中高频出现的核心业务关键词。',
+      contact_info: '电话、微信或客服热线。',
+    },
+    rules: [
+      'company_name 只能来自正文，不能来自文件名。',
+      'offerings 合并原来的主营业务和产品/服务，不要输出 main_business 或 products_services。',
+      'proven_cases 替代旧 cases；contact_info 替代旧 customer_service_phone；industry_category 替代旧 industry。',
+      '原文没有出现的字段 value 用 null 或 []，不要脑补。',
+      'target_keywords 可以从原文高频业务词提炼；若没有逐字原文，source_quote 为 null 且 confidence <= 0.8。',
+    ],
     enterprise_materials: corpus,
   });
 }
 
-function normalizeFact(fact = {}, index = 0) {
-  const value = normalizeText(fact.value);
-  const field = normalizeText(fact.field) || 'other';
-  if (!value) {
-    return null;
+function buildExtractionMessages(corpus) {
+  const skill = getSkill('knowledge-base-ingest');
+  if (!skill?.content) {
+    throw new Error('knowledge-base-ingest skill not found. Please keep skills/knowledge-base-ingest.md available before creating a knowledge base draft.');
   }
 
-  return {
-    id: fact.id || crypto.randomUUID(),
-    field,
-    label: normalizeText(fact.label) || field,
-    value,
-    source_file: normalizeText(fact.source_file) || '企业资料',
-    source_document_id: fact.source_document_id || `llm-source-${index}`,
-    quote: normalizeText(fact.quote) || value.slice(0, 220),
-    confidence: clamp(fact.confidence, 0, 1),
-    extraction: 'llm',
-  };
+  return [
+    { role: 'system', content: skill.content },
+    {
+      role: 'user',
+      content: JSON.stringify({
+        task: 'extract_enterprise_knowledge_profile',
+        rules: [
+          'Follow the knowledge-base-ingest skill exactly.',
+          'Return one valid JSON object only. Do not include Markdown, code fences, comments, prefixes, or suffixes.',
+          'Each profile field must be an evidence package: { "value": ..., "source_quote": ..., "confidence": ... }.',
+          'Do not output legacy fields: main_business, products_services, cases, customer_service_phone, industry.',
+          'If a field is missing from the source materials, use null or [] and source_quote null.',
+        ],
+        enterprise_materials: corpus,
+      }),
+    },
+  ];
+}
+
+function emptyForField(field) {
+  return ARRAY_FIELDS.has(field) ? [] : null;
 }
 
 function normalizeProfile(profile = {}, projectId = null) {
-  const normalized = compactObject({
-    project_id: projectId,
-    company_name: normalizeText(profile.company_name) || UNKNOWN_COMPANY_NAME,
-    main_business: profile.main_business,
-    products_services: profile.products_services,
-    user_pain_points: profile.user_pain_points,
-    core_advantages: profile.core_advantages,
-    trust_endorsements: profile.trust_endorsements,
-    cases: profile.cases,
-    target_keywords: profile.target_keywords,
+  const normalized = { project_id: projectId };
+  PROFILE_FIELDS.forEach((field) => {
+    normalized[field] = toEvidenceField(profile[field], emptyForField(field));
   });
-
-  OPTIONAL_PROFILE_FIELDS.forEach((field) => {
-    if (normalizeText(profile[field])) {
-      normalized[field] = normalizeText(profile[field]);
-    }
-  });
-
+  if (!fieldText(normalized, 'company_name')) {
+    normalized.company_name = toEvidenceField(UNKNOWN_COMPANY_NAME);
+  }
   return normalized;
+}
+
+function normalizeFact(field, evidence = {}, index = 0) {
+  const value = normalizeText(fieldValue(evidence));
+  if (!value) return null;
+  const quote = normalizeText(evidence.source_quote);
+  return {
+    id: crypto.randomUUID(),
+    field,
+    label: field,
+    value,
+    source_file: '企业资料',
+    source_document_id: `llm-source-${index}`,
+    quote: quote || value.slice(0, 220),
+    confidence: clamp(evidence.confidence, 0, quote ? 1 : 0.8),
+    extraction: 'llm',
+  };
 }
 
 function missingFieldsForProfile(profile = {}, modelMissingFields = []) {
   const missing = new Set(modelMissingFields.map(normalizeText).filter(Boolean));
   REQUIRED_FIELDS.forEach(([field, label]) => {
-    if (!normalizeText(profile[field]) || profile[field] === UNKNOWN_COMPANY_NAME) {
+    if (!fieldText(profile, field) || fieldText(profile, field) === UNKNOWN_COMPANY_NAME) {
       missing.add(label);
     }
   });
@@ -200,7 +195,7 @@ function missingFieldsForProfile(profile = {}, modelMissingFields = []) {
 function buildFieldReviews(profile = {}, facts = []) {
   return REQUIRED_FIELDS.map(([field, label]) => {
     const relatedFacts = facts.filter((fact) => fact.field === field);
-    const value = normalizeText(profile[field]);
+    const value = fieldText(profile, field);
     return {
       field,
       label,
@@ -217,9 +212,7 @@ function buildSourceQuotes(facts = []) {
   const seen = new Set();
   return facts.reduce((quotes, fact) => {
     const key = `${fact.source_file}:${fact.quote}`;
-    if (!fact.quote || seen.has(key)) {
-      return quotes;
-    }
+    if (!fact.quote || seen.has(key)) return quotes;
     seen.add(key);
     quotes.push({
       id: crypto.randomUUID(),
@@ -233,10 +226,10 @@ function buildSourceQuotes(facts = []) {
 }
 
 function normalizeExtractionResult(result = {}, projectId = null) {
-  const facts = Array.isArray(result.facts)
-    ? result.facts.map(normalizeFact).filter(Boolean)
-    : [];
   const profile = normalizeProfile(result.profile || {}, projectId);
+  const facts = PROFILE_FIELDS
+    .map((field, index) => normalizeFact(field, profile[field], index))
+    .filter(Boolean);
   const missingFields = missingFieldsForProfile(profile, Array.isArray(result.missing_fields) ? result.missing_fields : []);
   const fieldReviews = buildFieldReviews(profile, facts);
   const sourceQuotes = buildSourceQuotes(facts);
@@ -288,10 +281,7 @@ async function extractKnowledgeDraft({ documents = [], message = '', projectId =
   const corpus = buildCorpus(documents, message);
   validateCorpus(corpus);
 
-  const messages = [
-    { role: 'system', content: createSystemPrompt() },
-    { role: 'user', content: createUserPrompt(corpus) },
-  ];
+  const messages = buildExtractionMessages(corpus);
   const policy = getTaskPolicy('knowledge_extraction');
 
   try {
@@ -308,10 +298,7 @@ async function extractKnowledgeDraft({ documents = [], message = '', projectId =
       extraction_api_family: policy.api_family,
     };
   } catch (error) {
-    if (!retry) {
-      throw error;
-    }
-
+    if (!retry) throw error;
     const completion = await runExtractionJson({
       messages: [
         ...messages,
@@ -334,10 +321,7 @@ async function extractKnowledgeDraftStream({ documents = [], message = '', proje
   const corpus = buildCorpus(documents, message);
   validateCorpus(corpus);
 
-  const messages = [
-    { role: 'system', content: createSystemPrompt() },
-    { role: 'user', content: createUserPrompt(corpus) },
-  ];
+  const messages = buildExtractionMessages(corpus);
   const policy = getTaskPolicy('knowledge_extraction');
 
   const runStream = async (streamMessages, attempt) => {
@@ -376,9 +360,7 @@ async function extractKnowledgeDraftStream({ documents = [], message = '', proje
       extraction_request_id: completion.request_id,
     };
   } catch (error) {
-    if (!retry) {
-      throw error;
-    }
+    if (!retry) throw error;
     onEvent?.({
       type: 'model_status',
       task_type: 'knowledge_extraction',
