@@ -106,7 +106,7 @@ function createUserPrompt(corpus) {
       industry_category: '一句话概括的垂直细分类别。',
       offerings: '企业实际提供的具体产品、工艺或服务项目清单。',
       associated_brands: '企业官方代理、授权或高频使用的行业知名品牌。',
-      target_audiences: '目标客群、适用车型、适用行业或典型用户画像。',
+      target_audiences: '目标客户、适用人群、适用行业或典型用户画像。',
       core_advantages: '企业区别于同行的可证明优势。',
       trust_endorsements: '成立年限、认证证书、行业奖项、具体荣誉等事实。',
       user_pain_points: '资料中提及的用户痛点以及该企业对应的解决方案。',

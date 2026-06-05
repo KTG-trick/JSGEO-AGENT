@@ -358,14 +358,16 @@ export function KnowledgeBase() {
     setMode('detail');
   };
 
-  const openBuilder = () => {
-    setProfileForm(emptyProfile);
-    uploadedImages.forEach((image) => URL.revokeObjectURL(image.previewUrl));
-    setUploadedImages([]);
-    setSelectedProfile(null);
-    setIsEditingProfile(false);
-    setProfileError(null);
-    setMode('builder');
+  const startKnowledgeIngest = () => {
+    window.dispatchEvent(new CustomEvent('geo-agent-open-view', { detail: { view: 'agent' } }));
+    window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent('geo-agent-start-knowledge-ingest', {
+        detail: {
+          intent: 'create',
+          message: '请使用知识库录入技能，引导我上传企业资料并生成知识库草稿。',
+        },
+      }));
+    }, 80);
   };
 
   const openEditor = () => {
@@ -470,7 +472,6 @@ export function KnowledgeBase() {
           geoSourceDiscoveries={geoSourceDiscoveries}
           indexStatus={indexStatus}
           onBack={() => setMode('list')}
-          onCreate={openBuilder}
           onDelete={() => selectedProfile && setDeleteTarget(selectedProfile)}
           onEdit={openEditor}
           onRefresh={() => refreshKnowledgeEntries()}
@@ -513,7 +514,7 @@ export function KnowledgeBase() {
           </p>
           <button
             className="mt-3 inline-flex items-center gap-2 rounded-xl bg-secondary px-4 py-2.5 text-[13px] font-bold text-on-secondary transition-colors hover:bg-secondary/90"
-            onClick={openBuilder}
+            onClick={startKnowledgeIngest}
             type="button"
           >
             <Plus className="h-4 w-4" />
@@ -814,7 +815,6 @@ function KnowledgeDetail({
   geoSourceDiscoveries,
   indexStatus,
   onBack,
-  onCreate,
   onDelete,
   onEdit,
   onRefresh,
@@ -834,7 +834,6 @@ function KnowledgeDetail({
   geoSourceDiscoveries: Record<'doubao' | 'deepseek', GeoAgentGeoSourceDiscovery | null>;
   indexStatus: GeoAgentKnowledgeIndexStatus | null;
   onBack: () => void;
-  onCreate: () => void;
   onDelete: () => void;
   onEdit: () => void;
   onRefresh: () => Promise<void>;
@@ -861,57 +860,57 @@ function KnowledgeDetail({
   const [isTestingRetrieval, setIsTestingRetrieval] = useState(false);
   const uploadInputId = `knowledge-upload-${projectId || 'current'}`;
 
-  const handleDocumentUploadLegacy = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.currentTarget.files ?? []) as File[];
-    event.target.value = '';
-    if (!files.length || !projectId || !window.geoAgent?.createKnowledgeAsset) {
-      return;
-    }
-    setIsUploading(true);
-    setUploadError(null);
-    try {
-      await window.geoAgent.createKnowledgeDraft({
-        message: `请根据上传附件生成「${enterpriseName}」企业知识库更新草稿。`,
-        intent: 'update',
-        project_id: projectId,
-        skill_id: 'knowledge-base-ingest',
-        assets: await Promise.all(files.map(async (file) => ({
-          filename: file.name,
-          content_type: file.type || null,
-          content_base64: await fileToBase64(file),
-        }))),
-      });
-      setUploadError('已生成知识库更新草稿。请到智能助手中确认后再正式写入知识库。');
-      await onRefresh();
-    } catch (error) {
-      setUploadError(error instanceof Error ? error.message : '文档上传或解析失败。');
-    } finally {
-      setIsUploading(false);
-    }
-  };
-
-  void handleDocumentUploadLegacy;
-
   const handleDocumentUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.currentTarget.files ?? []) as File[];
     event.target.value = '';
-    if (!files.length || !projectId || !window.geoAgent?.createKnowledgeAsset) {
+    if (!files.length || !projectId) {
+      return;
+    }
+    if (!window.geoAgent?.createKnowledgeDraft && !window.geoAgent?.createKnowledgeDraftStream) {
+      setUploadError('桌面端主进程接口尚未刷新，请完全关闭并重新启动 Electron 后再上传。');
       return;
     }
     setIsUploading(true);
     setUploadError(null);
     try {
       const assets = await Promise.all(files.map(async (file) => ({
-        project_id: projectId,
         filename: file.name,
         content_type: file.type || null,
         content_base64: await fileToBase64(file),
       })));
-      for (const nextAsset of assets) {
-        await window.geoAgent.createKnowledgeAsset(nextAsset);
+      const draftPayload = {
+        message: `请根据上传附件生成「${enterpriseName}」企业知识库更新草稿。`,
+        intent: 'update',
+        project_id: projectId,
+        skill_id: 'knowledge-base-ingest',
+        assets,
+      };
+      let conversationId: string | null = null;
+      if (window.geoAgent.createKnowledgeDraftStream) {
+        const finalEvent = await window.geoAgent.createKnowledgeDraftStream(draftPayload, () => undefined);
+        if (finalEvent.type === 'error') {
+          throw new Error(finalEvent.error || '知识库更新草稿生成失败。');
+        }
+        conversationId = finalEvent.conversation_id || finalEvent.draft?.conversation_id || null;
+      } else if (window.geoAgent.createKnowledgeDraft) {
+        const draft = await window.geoAgent.createKnowledgeDraft(draftPayload);
+        conversationId = draft.conversation_id || null;
       }
-      setUploadError(`已保存 ${files.length} 个源文件，并写入本地检索索引。`);
-      await onRefresh();
+      setUploadError('已生成知识库更新草稿，请在智能助手中确认后写入当前知识库。');
+      window.dispatchEvent(new CustomEvent('geo-agent-open-view', { detail: { view: 'agent' } }));
+      window.setTimeout(() => {
+        if (conversationId) {
+          window.dispatchEvent(new CustomEvent('geo-agent-open-conversation', { detail: { id: conversationId } }));
+          return;
+        }
+        window.dispatchEvent(new CustomEvent('geo-agent-start-knowledge-ingest', {
+          detail: {
+            intent: 'update',
+            projectId,
+            message: `请根据上传附件生成「${enterpriseName}」企业知识库更新草稿。`,
+          },
+        }));
+      }, 80);
     } catch (error) {
       setUploadError(error instanceof Error ? error.message : '文档上传或解析失败。');
     } finally {
@@ -1081,7 +1080,7 @@ function KnowledgeDetail({
               </p>
               <p className="mt-1 text-[12px] leading-relaxed text-on-surface-variant">
                 {geoProject?.current_phase === 'ready_for_check'
-                  ? '知识库已具备基础资料和可检索索引，下一步可构建豆包/DeepSeek 排行榜问题池。'
+                  ? '知识库已具备基础资料和可检索索引，下一步可构建 AI 核心问题池。'
                   : '继续补充企业资料、附件和索引状态，避免后续自查缺少事实依据。'}
               </p>
               {geoProject?.current_phase === 'ready_for_check' && (
@@ -1686,7 +1685,7 @@ function buildKnowledgeHealthReport(
       missingItems: missingLabels(profileData, [
         ['offerings', '产品与服务项目'],
         ['associated_brands', '关联/代理品牌'],
-        ['target_audiences', '目标客群/适用车型'],
+        ['target_audiences', '目标客户/适用人群'],
         ['core_advantages', '核心优势'],
       ]),
       recommendedAction: '按服务分类补充卖点、套餐、价格和差异化优势。',
@@ -1750,7 +1749,7 @@ function buildKnowledgeHealthReport(
       weight: 0.08,
       reason: '阶段二需要企业背景、关键词和可检索资料共同支撑。',
       missingItems: [],
-      recommendedAction: '知识库达到 70 分以上后，可启动豆包/DeepSeek 排行榜问题池构建。',
+      recommendedAction: '知识库达到 70 分以上后，可启动 AI 核心问题池构建。',
     }),
   ];
 
@@ -1828,6 +1827,9 @@ function buildGeoStagesFromProject(
     : geoProject?.current_phase === 'collecting'
       ? '进行中'
       : '待启动';
+  const stageTwoStatuses = [doubaoStageTwoStatus.status, deepseekStageTwoStatus.status];
+  const stageThreeStatuses = [doubaoStageThreeStatus.status, deepseekStageThreeStatus.status];
+  const stageFourStatuses = [doubaoStageFourStatus.status, deepseekStageFourStatus.status];
   return [
     {
       label: '阶段一：企业知识库构建',
@@ -1837,34 +1839,28 @@ function buildGeoStagesFromProject(
         : '继续补齐企业资料、附件和索引状态。',
     },
     {
-      label: '阶段二：豆包排行榜问题池',
-      status: doubaoStageTwoStatus.status,
-      description: doubaoStageTwoStatus.description,
+      label: '阶段二：AI 核心问题池',
+      status: combineGeoStageStatuses(stageTwoStatuses),
+      description: `基于企业知识库和目标词生成 10 条核心问题。${platformStatusSummary([
+        ['豆包', doubaoStageTwoStatus],
+        ['DeepSeek', deepseekStageTwoStatus],
+      ])}`,
     },
     {
-      label: '阶段二：DeepSeek 排行榜问题池',
-      status: deepseekStageTwoStatus.status,
-      description: deepseekStageTwoStatus.description,
+      label: '阶段三：高权重信源发现',
+      status: combineGeoStageStatuses(stageThreeStatuses),
+      description: `仅信源发现使用豆包助手联网能力，并只实测 3 条排行榜/推荐类问题。${platformStatusSummary([
+        ['豆包', doubaoStageThreeStatus],
+        ['DeepSeek', deepseekStageThreeStatus],
+      ])}`,
     },
     {
-      label: '阶段三：豆包高权重信源发现',
-      status: doubaoStageThreeStatus.status,
-      description: doubaoStageThreeStatus.description,
-    },
-    {
-      label: '阶段三：DeepSeek 高权重信源发现',
-      status: deepseekStageThreeStatus.status,
-      description: deepseekStageThreeStatus.description,
-    },
-    {
-      label: '阶段四：豆包咨询/测评支撑内容',
-      status: doubaoStageFourStatus.status,
-      description: doubaoStageFourStatus.description,
-    },
-    {
-      label: '阶段四：DeepSeek 咨询/测评支撑内容',
-      status: deepseekStageFourStatus.status,
-      description: deepseekStageFourStatus.description,
+      label: '阶段四：内容资产生成',
+      status: combineGeoStageStatuses(stageFourStatuses),
+      description: `生成咨询、测评和排行支撑稿件，供稿件管理与发布使用。${platformStatusSummary([
+        ['豆包', doubaoStageFourStatus],
+        ['DeepSeek', deepseekStageFourStatus],
+      ])}`,
     },
     { label: '阶段五：稿件管理与发布', status: '待启动', description: '校对稿件、生成 OSS 预览、选择媒体投递并同步订单状态。' },
     { label: '阶段六：AI 推荐可见性检测', status: '待启动', description: '有已发布文章 URL 后自动检测核心问题，并每 10 分钟复查。' },
@@ -1876,30 +1872,76 @@ function buildGeoStagesFromWorkflow(workflow: GeoAgentWorkflowState | null): Geo
   if (!workflow) {
     return null;
   }
-  const stages: GeoStageStatus[] = [
+  return [
     {
       label: '阶段一：企业知识库构建',
       status: mapWorkflowStatus(workflow.stage_1.status),
-      description: workflow.stage_1.description,
+      description: '上传或粘贴企业资料，确认后建立结构化知识库、本地全文索引和可选向量索引。',
+    },
+    {
+      label: '阶段二：AI 核心问题池',
+      status: workflowStageStatus(workflow, 'stage_2'),
+      description: `基于企业知识库和目标词生成 10 条核心问题。${workflowPlatformSummary(workflow, 'stage_2')}`,
+    },
+    {
+      label: '阶段三：高权重信源发现',
+      status: workflowStageStatus(workflow, 'stage_3'),
+      description: `仅信源发现使用豆包助手联网能力，并只实测 3 条排行榜/推荐类问题。${workflowPlatformSummary(workflow, 'stage_3')}`,
+    },
+    {
+      label: '阶段四：内容资产生成',
+      status: workflowStageStatus(workflow, 'stage_4'),
+      description: `生成咨询、测评和排行支撑稿件，供稿件管理与发布使用。${workflowPlatformSummary(workflow, 'stage_4')}`,
+    },
+    {
+      label: '阶段五：稿件管理与发布',
+      status: workflowStageStatus(workflow, 'stage_5'),
+      description: `校对稿件、生成 OSS 预览、选择媒体投递并同步订单状态。${workflowPlatformSummary(workflow, 'stage_5')}`,
+    },
+    {
+      label: '阶段六：AI 推荐可见性检测',
+      status: workflowStageStatus(workflow, 'stage_6'),
+      description: `有已发布文章 URL 后使用 web search 可见性检测，并每 10 分钟复查。${workflowPlatformSummary(workflow, 'stage_6')}`,
+    },
+    {
+      label: '阶段七：反思优化/自动学习',
+      status: workflowStageStatus(workflow, 'stage_7'),
+      description: `仅在文章被 AI 推荐或排名上升时生成待确认学习规则。${workflowPlatformSummary(workflow, 'stage_7')}`,
     },
   ];
-  (['doubao', 'deepseek'] as const).forEach((platform) => {
-    const platformState = workflow.platforms[platform];
-    if (!platformState) {
-      return;
-    }
-    ['stage_2', 'stage_3', 'stage_4', 'stage_5', 'stage_6', 'stage_7'].forEach((stageKey) => {
-      const stage = platformState.stages[stageKey];
-      if (stage) {
-        stages.push({
-          label: `阶段${stage.stage}：${stage.label}`,
-          status: mapWorkflowStatus(stage.status),
-          description: stage.description,
-        });
-      }
-    });
-  });
-  return stages;
+}
+
+function workflowStageStatus(workflow: GeoAgentWorkflowState, stageKey: string): GeoStageStatus['status'] {
+  const statuses = Object.values(workflow.platforms)
+    .map((platformState) => platformState.stages[stageKey]?.status)
+    .filter((status): status is string => Boolean(status))
+    .map(mapWorkflowStatus);
+  return combineGeoStageStatuses(statuses);
+}
+
+function workflowPlatformSummary(workflow: GeoAgentWorkflowState, stageKey: string) {
+  return platformStatusSummary(Object.values(workflow.platforms).map((platformState) => [
+    platformState.label || platformState.platform,
+    {
+      status: mapWorkflowStatus(platformState.stages[stageKey]?.status || 'not_started'),
+      description: platformState.stages[stageKey]?.description || '',
+    },
+  ]));
+}
+
+function platformStatusSummary(items: Array<[string, Pick<GeoStageStatus, 'status' | 'description'>]>) {
+  const summary = items
+    .map(([label, item]) => `${label}：${item.status}`)
+    .join('；');
+  return summary ? `平台状态：${summary}。` : '';
+}
+
+function combineGeoStageStatuses(statuses: GeoStageStatus['status'][]): GeoStageStatus['status'] {
+  if (statuses.includes('进行中')) return '进行中';
+  if (statuses.includes('可用')) return '可用';
+  if (statuses.includes('已暂缓')) return '已暂缓';
+  if (statuses.includes('待启动')) return '待启动';
+  return '待开发';
 }
 
 function mapWorkflowStatus(status: string): GeoStageStatus['status'] {

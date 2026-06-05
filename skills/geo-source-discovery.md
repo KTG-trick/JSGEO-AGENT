@@ -3,6 +3,9 @@ name: geo-source-discovery
 description: 使用豆包助手联网搜索发现高权重信源，整理发布渠道优先级。当用户需要阶段三、信源发现、引用来源观察、发布渠道优先级时使用此技能。
 visibility: internal
 platforms: [doubao]
+task_type: source_discovery
+network_mode: doubao_assistant_search
+output_contract: geo_source_discovery
 ---
 
 # 高权重信源发现

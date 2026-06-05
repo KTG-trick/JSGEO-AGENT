@@ -5,6 +5,13 @@ const { getTaskPolicy } = require('./modelPolicyService.cjs');
 const { fieldText } = require('./profileFieldService.cjs');
 
 const SUMMARY_MESSAGE_DELTA = 6;
+const PLACEHOLDER_NAMES = new Set([
+  '',
+  '待确认企业名称',
+  '待确认企业知识库',
+  '企业知识库草稿',
+  '待录入企业',
+]);
 
 function nowIso() {
   return new Date().toISOString();
@@ -25,6 +32,11 @@ function parseJson(value, fallback = {}) {
 
 function normalizeText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function usefulName(value) {
+  const text = normalizeText(value);
+  return text && !PLACEHOLDER_NAMES.has(text) ? text : '';
 }
 
 function previewText(value, maxLength = 120) {
@@ -52,10 +64,12 @@ function isTransientConversationText(value) {
 }
 
 function getCompanyNameFromMetadata(metadata) {
-  return fieldText(metadata?.profile || {}, 'company_name')
-    || fieldText(metadata?.draft?.profile || {}, 'company_name')
-    || metadata?.project?.company_name
-    || metadata?.question_set?.company_name
+  return usefulName(fieldText(metadata?.profile || {}, 'company_name'))
+    || usefulName(fieldText(metadata?.profile || {}, 'short_name'))
+    || usefulName(fieldText(metadata?.draft?.profile || {}, 'company_name'))
+    || usefulName(fieldText(metadata?.draft?.profile || {}, 'short_name'))
+    || usefulName(metadata?.project?.company_name)
+    || usefulName(metadata?.question_set?.company_name)
     || null;
 }
 
@@ -655,6 +669,47 @@ function findLatestConversation(projectId, kind = null) {
   return row ? rowToConversation(row) : null;
 }
 
+function findRunningPhaseMessage({ conversationId, projectId, phase, platform }) {
+  if (!conversationId || !projectId || !phase) {
+    return null;
+  }
+  const rows = getDb().prepare(`
+    SELECT *
+    FROM messages
+    WHERE conversation_id = ? AND project_id = ? AND role = 'assistant'
+    ORDER BY datetime(created_at) DESC
+    LIMIT 30
+  `).all(conversationId, projectId);
+  const match = rows.find((row) => {
+    const metadata = parseJson(row.metadata_json, {});
+    return metadata.type === 'geo_phase_prompt'
+      && metadata.status === 'streaming'
+      && Number(metadata.phase) === Number(phase)
+      && (!platform || metadata.platform === platform);
+  });
+  return match ? rowToMessage(match) : null;
+}
+
+function updateConversationTitle(conversationId, title) {
+  const nextTitle = usefulName(title);
+  if (!conversationId || !nextTitle) {
+    return null;
+  }
+  const timestamp = nowIso();
+  getDb().prepare(`
+    UPDATE conversations
+    SET title = @title,
+        summary_dirty = 1,
+        updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id: conversationId,
+    title: nextTitle,
+    updated_at: timestamp,
+  });
+  return rowToConversation(getConversationRow(conversationId));
+}
+
 async function listPublicConversations(limit = 40) {
   return listConversations(null, limit);
 }
@@ -666,6 +721,7 @@ module.exports = {
   clearConversationHistory,
   deleteConversation,
   ensureConversation,
+  findRunningPhaseMessage,
   findLatestConversation,
   getConversation,
   listConversations,
@@ -674,5 +730,6 @@ module.exports = {
   markConversationSummaryDirty,
   maybeUpdateConversationSummary,
   touchConversationForSummary,
+  updateConversationTitle,
   updateConversationMessage,
 };

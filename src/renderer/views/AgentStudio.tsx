@@ -55,10 +55,23 @@ import {
   PromptInputTools,
 } from '../components/ai-elements/prompt-input';
 import {
+  Queue,
+  QueueItem,
+  QueueItemContent,
+  QueueItemDescription,
+  QueueItemIndicator,
+  QueueList,
+  QueueSection,
+  QueueSectionContent,
+  QueueSectionLabel,
+  QueueSectionTrigger,
+} from '../components/ai-elements/queue';
+import {
   Reasoning,
   ReasoningContent,
   ReasoningTrigger,
 } from '../components/ai-elements/reasoning';
+import { Shimmer } from '../components/ai-elements/shimmer';
 import {
   Task,
   TaskContent,
@@ -134,6 +147,7 @@ type ChatMessage = {
   error?: string | null;
   actionBusy?: boolean;
   progressiveDraftGroups?: number;
+  geoProjectId?: string;
 };
 
 type ConfigStatus = Awaited<ReturnType<NonNullable<Window['geoAgent']>['getConfigStatus']>>;
@@ -198,10 +212,14 @@ type ProfileFieldDefinition = {
 
 const profileFieldDefinitions = PROFILE_FIELD_DEFINITIONS as ProfileFieldDefinition[];
 const PROFILE_SUMMARY_FIELDS = profileFieldDefinitions.map((field) => [field.key, field.label] as [keyof GeoAgentEnterpriseProfile, string]);
-const PLACEHOLDER_PROFILE_VALUES = new Set(['', '待补充', '未填', '未填写', DRAFT_PROFILE_NAME]);
+const PLACEHOLDER_PROFILE_VALUES = new Set(['', '待补充', '未填', '未填写', DRAFT_PROFILE_NAME, '待确认企业名称', '待确认企业知识库', '企业知识库草稿', '待录入企业']);
 
 function phaseTwoPromptKey(projectId: string, conversationId: string | null, platform: 'doubao' | 'deepseek') {
   return `${projectId}:${platform}`;
+}
+
+function stageRunKey(geoProjectId: string | null | undefined, platform: 'doubao' | 'deepseek', phase: 2 | 3 | 4) {
+  return `${geoProjectId || 'unknown'}:${platform}:phase-${phase}`;
 }
 
 function conversationStorageKey(projectId?: string | null, conversationId?: string | null) {
@@ -389,19 +407,23 @@ function updateSupportArticleDraft(
 
 function getNextWorkflowAction(
   workflowState: GeoAgentWorkflowState | null,
-  message: ChatMessage
+  message: ChatMessage,
+  runningStageKeys: Set<string>
 ): { type: 'source_discovery' | 'support_articles' | 'stage_five_waiting'; label: string; primaryLabel: string } | null {
   const platform = getMessagePlatform(message);
   const platformWorkflow = platform ? workflowState?.platforms[platform] : undefined;
   const stageThreeStatus = platformWorkflow?.stages.stage_3?.status;
   const stageFourStatus = platformWorkflow?.stages.stage_4?.status;
   const stageFiveStatus = platformWorkflow?.stages.stage_5?.status;
+  const phaseThreeBlocked = platform && runningStageKeys.has(stageRunKey(message.geoReport?.geo_project_id, platform, 3));
+  const phaseFourBlocked = platform && runningStageKeys.has(stageRunKey(message.sourceDiscovery?.geo_project_id, platform, 4));
 
   if (
     message.geoReport?.status === 'completed'
     && !message.sourceDiscovery
     && !message.sourceDiscoveryExecution
     && !message.sourceDiscoveryAttempted
+    && !phaseThreeBlocked
     && (!stageThreeStatus || stageThreeStatus === 'ready')
   ) {
     return {
@@ -417,6 +439,7 @@ function getNextWorkflowAction(
     && !message.articleDraftExecution
     && !message.supportArticles
     && !message.supportArticlesPrompt
+    && !phaseFourBlocked
     && (!stageFourStatus || stageFourStatus === 'ready')
   ) {
     return {
@@ -431,7 +454,7 @@ function getNextWorkflowAction(
   if (message.supportArticles && (stageFiveStatus ? stageFiveStatus === 'ready' : consultingConfirmed && reviewConfirmed)) {
     return {
       type: 'stage_five_waiting',
-      label: '阶段四内容资产已生成，可前往稿件管理页进行发布分发和推荐检测。',
+      label: '阶段四内容资产已生成，可前往稿件管理页校对、生成 OSS 预览并投递。',
       primaryLabel: '前往稿件管理',
     };
   }
@@ -484,6 +507,27 @@ function normalizeRestoredWorkflowMessages(messages: ChatMessage[]) {
       confirmationApproved: true,
     };
   });
+}
+
+function collectRunningStageKeys(messages: ChatMessage[]) {
+  const keys = new Set<string>();
+  messages.forEach((message) => {
+    const platform = getMessagePlatform(message);
+    if (!platform) {
+      return;
+    }
+    if (message.phaseTwoExecution || message.geoReport) {
+      keys.add(stageRunKey(message.geoReport?.geo_project_id ?? message.geoProjectId, platform, 2));
+    }
+    if (message.sourceDiscoveryExecution || message.sourceDiscovery) {
+      keys.add(stageRunKey(message.sourceDiscovery?.geo_project_id ?? message.geoReport?.geo_project_id ?? message.geoProjectId, platform, 3));
+    }
+    if (message.articleDraftExecution || message.supportArticles) {
+      const supportGeoProjectId = (message.supportArticles as { geo_project_id?: string } | undefined)?.geo_project_id;
+      keys.add(stageRunKey(supportGeoProjectId ?? message.sourceDiscovery?.geo_project_id ?? message.geoProjectId, platform, 4));
+    }
+  });
+  return keys;
 }
 
 function isValidGeoProject(value: unknown): value is GeoAgentGeoProject {
@@ -691,13 +735,20 @@ export function AgentStudio() {
   const inputShellRef = useRef<HTMLDivElement | null>(null);
   const openConversationRequestRef = useRef(0);
   const phaseTwoPromptInFlightRef = useRef<Set<string>>(new Set());
+  const stageInFlightRef = useRef<Set<string>>(new Set());
   const typewriterQueuesRef = useRef<Record<string, Promise<void>>>({});
   const skipNextConversationAutoRestoreRef = useRef(false);
+  const pendingKnowledgeIngestRef = useRef<{
+    intent?: 'create' | 'update';
+    projectId?: string;
+    message?: string;
+  } | null>(null);
   const [isConversationHistoryResetting, setIsConversationHistoryResetting] = useState(
     () => typeof window !== 'undefined' && localStorage.getItem(CONVERSATION_HISTORY_RESET_KEY) !== 'done'
   );
 
   const currentConversationStorageKey = conversationStorageKey(currentEnterprise?.id);
+  const runningStageKeys = useMemo(() => collectRunningStageKeys(messages), [messages]);
 
   useEffect(() => {
     localStorage.setItem(CONVERSATION_HISTORY_RESET_KEY, 'done');
@@ -748,6 +799,17 @@ export function AgentStudio() {
       setSelectedSkill(knowledgeSkill);
     }
   }, [conversationId, hasEnterprises, messages.length, selectedSkill, skills]);
+
+  useEffect(() => {
+    if (!pendingKnowledgeIngestRef.current || selectedSkill) {
+      return;
+    }
+    const knowledgeSkill = skills.find((skill) => skill.id === 'knowledge-base-ingest' || skill.name.includes('知识库'));
+    if (knowledgeSkill) {
+      setSelectedSkill(knowledgeSkill);
+      pendingKnowledgeIngestRef.current = null;
+    }
+  }, [selectedSkill, skills]);
 
   useEffect(() => {
     if (!hasEnterprises || !currentEnterprise?.id || !window.geoAgent?.ensureGeoProject) {
@@ -818,17 +880,37 @@ export function AgentStudio() {
         })
         .catch(() => undefined);
     };
+    const handleStartKnowledgeIngest = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        intent?: 'create' | 'update';
+        projectId?: string;
+        message?: string;
+      }>).detail ?? {};
+      const knowledgeSkill = skills.find((skill) => skill.id === 'knowledge-base-ingest' || skill.name.includes('知识库'));
+      pendingKnowledgeIngestRef.current = detail;
+      startNewConversation();
+      setSelectedSkill(knowledgeSkill ?? null);
+      if (knowledgeSkill) {
+        pendingKnowledgeIngestRef.current = null;
+      }
+      setIsSkillsOpen(false);
+      setInputValue(detail.message || (detail.intent === 'update'
+        ? '请基于上传资料补充当前企业知识库，并生成待确认的更新草稿。'
+        : '请引导我上传企业资料，并生成待确认的企业知识库草稿。'));
+    };
     window.addEventListener('geo-agent-open-conversation', handleOpenConversation);
     window.addEventListener('geo-agent-new-conversation', handleNewConversation);
     window.addEventListener('geo-agent-conversation-deleted', handleDeletedConversation);
     window.addEventListener('geo-agent-start-phase-two', handleStartPhaseTwo);
+    window.addEventListener('geo-agent-start-knowledge-ingest', handleStartKnowledgeIngest);
     return () => {
       window.removeEventListener('geo-agent-open-conversation', handleOpenConversation);
       window.removeEventListener('geo-agent-new-conversation', handleNewConversation);
       window.removeEventListener('geo-agent-conversation-deleted', handleDeletedConversation);
       window.removeEventListener('geo-agent-start-phase-two', handleStartPhaseTwo);
+      window.removeEventListener('geo-agent-start-knowledge-ingest', handleStartKnowledgeIngest);
     };
-  }, [conversationId, currentConversationStorageKey]);
+  }, [conversationId, currentConversationStorageKey, skills]);
 
   useEffect(() => {
     const closeMenusWhenOutsideInput = (event: PointerEvent | FocusEvent) => {
@@ -911,6 +993,11 @@ export function AgentStudio() {
               setConversationId(event.conversation_id);
               localStorage.setItem(conversationStorageKey(event.project_id || draftPayload.project_id || null, event.conversation_id), event.conversation_id);
               window.dispatchEvent(new CustomEvent('geo-agent-conversation-changed', { detail: { id: event.conversation_id } }));
+              if (knowledgeIntent === 'create' && event.project_id) {
+                skipNextConversationAutoRestoreRef.current = true;
+                setEnterpriseId(event.project_id);
+                refreshEnterprises().catch(() => undefined);
+              }
               if (knowledgeIntent === 'create') {
                 setMessages((current) => {
                   const currentAssistant = current.find((message) => message.id === assistantId) || assistantMessage;
@@ -1025,6 +1112,11 @@ export function AgentStudio() {
             setConversationId(finalEvent.conversation_id);
             localStorage.setItem(conversationStorageKey(draft.project_id || null, finalEvent.conversation_id), finalEvent.conversation_id);
             window.dispatchEvent(new CustomEvent('geo-agent-conversation-changed', { detail: { id: finalEvent.conversation_id } }));
+            if (knowledgeIntent === 'create' && draft.project_id) {
+              skipNextConversationAutoRestoreRef.current = true;
+              setEnterpriseId(draft.project_id);
+              refreshEnterprises().catch(() => undefined);
+            }
           }
           if (finalEvent.message) {
             setMessages((current) => {
@@ -1065,6 +1157,11 @@ export function AgentStudio() {
           setConversationId(draft.conversation_id);
           localStorage.setItem(conversationStorageKey(draft.project_id, draft.conversation_id), draft.conversation_id);
           window.dispatchEvent(new CustomEvent('geo-agent-conversation-changed', { detail: { id: draft.conversation_id } }));
+          if (knowledgeIntent === 'create' && draft.project_id) {
+            skipNextConversationAutoRestoreRef.current = true;
+            setEnterpriseId(draft.project_id);
+            refreshEnterprises().catch(() => undefined);
+          }
         }
         const draftMessageId = draftFinalEvent?.message?.id || assistantId;
         setMessages((current) => updateMessage(current, draftMessageId, (message) => ({
@@ -1256,6 +1353,10 @@ export function AgentStudio() {
   };
 
   const confirmPhaseTwo = async (messageId: string, project: GeoAgentGeoProject, platform: 'doubao' | 'deepseek' = AUTO_PLATFORM) => {
+    const lockKey = stageRunKey(project.id, platform, 2);
+    if (stageInFlightRef.current.has(lockKey) || runningStageKeys.has(lockKey)) {
+      return;
+    }
     if (!window.geoAgent?.runGeoPhaseTwoReportStream && !window.geoAgent?.runGeoPhaseTwoReport) {
       setMessages((current) => updateMessage(current, messageId, {
         content: '桌面端主进程接口尚未刷新，请完全关闭并重新启动 Electron 后再启动阶段二。',
@@ -1263,6 +1364,7 @@ export function AgentStudio() {
       }));
       return;
     }
+    stageInFlightRef.current.add(lockKey);
     const phaseTwoTargetId = `phase-two-result-${Date.now()}`;
     setMessages((current) => updateMessage(current, messageId, {
       confirmationState: 'approval-responded',
@@ -1275,6 +1377,7 @@ export function AgentStudio() {
       content: '',
       reasoning: `正在生成${platformLabelFor(platform)}平台排行榜问题池。`,
       phaseTwoPlatform: platform,
+      geoProjectId: project.id,
       phaseTwoExecution: {
         platform,
         companyName: project.company_name,
@@ -1395,6 +1498,8 @@ export function AgentStudio() {
         actionBusy: false,
         status: 'error',
       }));
+    } finally {
+      stageInFlightRef.current.delete(lockKey);
     }
   };
 
@@ -1419,6 +1524,10 @@ export function AgentStudio() {
 
   const runSourceDiscoveryFromReport = async (messageId: string, report: GeoAgentGeoReport) => {
     const platform = report.platform === 'deepseek' ? 'deepseek' : 'doubao';
+    const lockKey = stageRunKey(report.geo_project_id, platform, 3);
+    if (stageInFlightRef.current.has(lockKey) || runningStageKeys.has(lockKey)) {
+      return;
+    }
     if (!window.geoAgent?.runGeoSourceDiscovery) {
       setMessages((current) => updateMessage(current, messageId, {
         content: '桌面端主进程接口尚未刷新，请完全关闭并重新启动 Electron 后再执行高权重信源发现。',
@@ -1426,6 +1535,7 @@ export function AgentStudio() {
       }));
       return;
     }
+    stageInFlightRef.current.add(lockKey);
     setMessages((current) => updateMessage(current, messageId, {
       sourceDiscoveryAttempted: true,
       actionBusy: true,
@@ -1442,6 +1552,7 @@ export function AgentStudio() {
         role: 'assistant',
         content: '',
         reasoning: `正在发现${platformLabelFor(platform)}高权重信源。`,
+        geoProjectId: report.geo_project_id,
         phaseTwoPlatform: platform,
         sourceDiscoveryExecution: { platform, activeStep: 0 },
         status: 'streaming',
@@ -1451,7 +1562,7 @@ export function AgentStudio() {
     try {
       let discovery: GeoAgentGeoSourceDiscovery | null = null;
       if (window.geoAgent.runGeoSourceDiscoveryStream) {
-        await window.geoAgent.runGeoSourceDiscoveryStream(report.geo_project_id, platform, report, null, conversationId, messageId, (event) => {
+        const streamResult = await window.geoAgent.runGeoSourceDiscoveryStream(report.geo_project_id, platform, report, null, conversationId, messageId, (event) => {
           if (event.type === 'meta' && event.message && typeof event.message === 'object') {
             const restored = restoreConversationMessage(event.message as GeoAgentConversationMessage);
             const previousId = stageMessageId || '';
@@ -1462,6 +1573,7 @@ export function AgentStudio() {
             const nextMessage: ChatMessage = {
               ...restored,
               reasoning: `正在发现${platformLabelFor(platform)}高权重信源。`,
+              geoProjectId: report.geo_project_id,
               sourceDiscoveryExecution: { platform, activeStep: 0 },
               status: 'streaming',
             };
@@ -1493,6 +1605,13 @@ export function AgentStudio() {
             setMessages((current) => updateMessage(current, targetId, { content: event.content }));
           }
         });
+        if (streamResult.already_running) {
+          setMessages((current) => updateMessage(current, messageId, {
+            actionBusy: false,
+            status: 'complete',
+          }));
+          return;
+        }
       } else {
         const targetId = ensureStageMessage();
         await wait(450);
@@ -1522,6 +1641,8 @@ export function AgentStudio() {
         sourceDiscoveryAttempted: true,
         status: 'error',
       }));
+    } finally {
+      stageInFlightRef.current.delete(lockKey);
     }
   };
 
@@ -1548,6 +1669,10 @@ export function AgentStudio() {
     discovery: GeoAgentGeoSourceDiscovery
   ) => {
     const platform = discovery.platform === 'deepseek' ? 'deepseek' : 'doubao';
+    const lockKey = stageRunKey(discovery.geo_project_id, platform, 4);
+    if (stageInFlightRef.current.has(lockKey) || runningStageKeys.has(lockKey)) {
+      return;
+    }
     if (!window.geoAgent?.runGeoSupportArticles) {
       setMessages((current) => updateMessage(current, messageId, {
         content: '桌面端主进程接口尚未刷新，请完全关闭并重新启动 Electron 后再生成阶段四支撑内容。',
@@ -1555,6 +1680,7 @@ export function AgentStudio() {
       }));
       return;
     }
+    stageInFlightRef.current.add(lockKey);
     let stageMessageId = messageId;
     const shouldCreateBackendMessage = messageId.startsWith('stage-four-prompt-');
     setMessages((current) => updateMessage(current, messageId, {
@@ -1568,6 +1694,7 @@ export function AgentStudio() {
         platform,
         activeStep: 0,
       },
+      geoProjectId: discovery.geo_project_id,
       articleDraftAttempts: {
         consulting: true,
         review: true,
@@ -1577,7 +1704,7 @@ export function AgentStudio() {
     try {
       let result: GeoAgentGeoSupportArticleRunResponse | null = null;
       if (window.geoAgent.runGeoSupportArticlesStream) {
-        await window.geoAgent.runGeoSupportArticlesStream(discovery.geo_project_id, platform, {
+        const streamResult = await window.geoAgent.runGeoSupportArticlesStream(discovery.geo_project_id, platform, {
           messageId: shouldCreateBackendMessage ? null : messageId,
           conversationId: shouldCreateBackendMessage ? conversationId : null,
           parentMessageId: shouldCreateBackendMessage ? messageId : null,
@@ -1592,6 +1719,7 @@ export function AgentStudio() {
             const nextMessage: ChatMessage = {
               ...restored,
               reasoning: `正在生成${platformLabelFor(platform)}阶段四 9 篇内容资产。`,
+              geoProjectId: discovery.geo_project_id,
               articleDraftExecution: { platform, activeStep: 0 },
               articleDraftAttempts: { consulting: true, review: true },
               status: 'streaming',
@@ -1619,6 +1747,9 @@ export function AgentStudio() {
             setMessages((current) => updateMessage(current, stageMessageId, { content: event.content }));
           }
         });
+        if (streamResult.already_running) {
+          return;
+        }
       } else {
         await wait(450);
         setMessages((current) => updateMessage(current, stageMessageId, {
@@ -1650,6 +1781,8 @@ export function AgentStudio() {
         supportArticlesPrompt: discovery,
         status: 'error',
       }));
+    } finally {
+      stageInFlightRef.current.delete(lockKey);
     }
   };
 
@@ -1862,16 +1995,9 @@ export function AgentStudio() {
       return;
     }
     if (response.conversation.project_id && currentEnterprise?.id && response.conversation.project_id !== currentEnterprise.id) {
-      clearConversationStorageById(nextConversationId);
-      setMessages([{
-        id: `assistant-conversation-mismatch-${Date.now()}`,
-        role: 'assistant',
-        content: response.conversation.project_id
-          ? '这条历史会话属于另一个企业。请先切换到对应企业后再打开，避免知识库上下文串台。'
-          : '这条历史会话没有绑定当前企业，已停止自动恢复，避免知识库上下文串台。',
-        status: 'error',
-      }]);
-      return;
+      skipNextConversationAutoRestoreRef.current = true;
+      await refreshEnterprises();
+      setEnterpriseId(response.conversation.project_id);
     }
     const restoredMessages = response.messages
       .filter((message) => message.role === 'user' || message.role === 'assistant')
@@ -2022,6 +2148,7 @@ export function AgentStudio() {
               onRequestSupportArticles={requestSupportArticles}
               onRunArticleDraft={runArticleDraftFromDiscovery}
               onRunSourceDiscovery={runSourceDiscoveryFromReport}
+              runningStageKeys={runningStageKeys}
               workflowState={workflowState}
             />
           ))}
@@ -2248,9 +2375,10 @@ const ChatBubble: React.FC<{
   onRequestSupportArticles: (messageId: string, discovery: GeoAgentGeoSourceDiscovery) => void;
   onRunArticleDraft: (messageId: string, discovery: GeoAgentGeoSourceDiscovery, articleType: 'consulting' | 'review') => void;
   onRunSourceDiscovery: (messageId: string, report: GeoAgentGeoReport) => void;
+  runningStageKeys: Set<string>;
   workflowState: GeoAgentWorkflowState | null;
-}> = ({ message, onCancelPhaseTwo, onCancelSupportArticles, onConfirmDraft, onConfirmPhaseTwo, onConfirmArticleDraft, onConfirmSupportArticles, onRejectDraft, onRequestSupportArticles, onRunArticleDraft, onRunSourceDiscovery, workflowState }) => {
-  const nextAction = getNextWorkflowAction(workflowState, message);
+}> = ({ message, onCancelPhaseTwo, onCancelSupportArticles, onConfirmDraft, onConfirmPhaseTwo, onConfirmArticleDraft, onConfirmSupportArticles, onRejectDraft, onRequestSupportArticles, onRunArticleDraft, onRunSourceDiscovery, runningStageKeys, workflowState }) => {
+  const nextAction = getNextWorkflowAction(workflowState, message, runningStageKeys);
   if (message.role === 'user') {
     return (
       <Message from="user" className="max-w-[78%] items-end">
@@ -2358,10 +2486,13 @@ const ChatBubble: React.FC<{
             result={message.supportArticles}
           />
         )}
-        {message.status === 'streaming' && !message.content ? (
-          message.phaseTwoExecution || message.sourceDiscoveryExecution || message.articleDraftExecution ? null : <ThinkingIndicator label={message.reasoning ?? '正在思考'} />
-        ) : (
+        {message.content && (
           <MessageResponse className="max-w-none">{message.content}</MessageResponse>
+        )}
+        {message.status === 'streaming' && (
+          message.content || message.phaseTwoExecution || message.sourceDiscoveryExecution || message.articleDraftExecution
+            ? <StreamingTailIndicator label={message.reasoning ?? '正在等待模型继续输出'} />
+            : <ThinkingIndicator label={message.reasoning ?? '正在思考'} />
         )}
       </MessageContent>
       {message.knowledgeDraft && message.confirmationState === 'approval-requested' && isConfirmableKnowledgeDraft(message.knowledgeDraft) && (
@@ -2439,7 +2570,11 @@ const AssistantChainOfThought: React.FC<{
 }> = ({ content, isStreaming, liveSearchSteps, steps, searchQueries }) => (
   <ChainOfThought className="mb-4 border-0 bg-transparent px-0 py-1 shadow-none" defaultOpen={isStreaming}>
     <ChainOfThoughtHeader className="w-fit text-[12px] font-semibold text-[#68707a] hover:text-[#2f2f2f] dark:text-[#a8adb4] dark:hover:text-[#f1f1f1]">
-      {isStreaming ? '正在处理' : '处理过程'}
+      {isStreaming ? (
+        <Shimmer as="span" className="[--color-muted-foreground:var(--color-on-surface-variant)]" duration={1.5} spread={1.2}>
+          正在处理
+        </Shimmer>
+      ) : '处理过程'}
     </ChainOfThoughtHeader>
     <ChainOfThoughtContent className="mt-3 space-y-2">
       {(liveSearchSteps.length > 0 || searchQueries.length > 0) && (
@@ -2626,8 +2761,9 @@ const PHASE_TWO_REPORT_STEPS = [
 
 const SOURCE_DISCOVERY_STEPS = [
   '读取排行榜问题池',
+  '筛选 3 条实测问题',
   '询问目标 AI 推荐信源',
-  '观察真实问题引用线索',
+  '观察排行榜问题引用线索',
   '清洗可核验引用证据',
   '保存平台信源结果',
 ];
@@ -2640,58 +2776,75 @@ const ARTICLE_DRAFT_STEPS = [
   '保存阶段四草稿',
 ];
 
+const ARTICLE_DRAFT_QUEUE_ITEMS = [
+  { title: '企业/品牌支撑文章', description: '建立企业事实、品牌形象和基础信任' },
+  { title: '企业优势/信任背书稿', description: '沉淀优势、资质、服务承诺和背书证据' },
+  { title: '本地服务/售后承诺稿', description: '覆盖区域服务、交付能力和售后承诺' },
+  { title: '业务/服务测评文章', description: '面向用户选型场景输出测评型内容' },
+  { title: '真实案例/口碑展示稿', description: '沉淀案例、客户反馈和可引用证据' },
+  { title: '工艺流程/选择标准稿', description: '解释服务流程、选择标准和避坑要点' },
+  { title: '综合推荐/行业排行稿', description: '承接核心推荐类问题的榜单内容' },
+  { title: '区域推荐/本地榜单稿', description: '承接区域服务商、本地推荐问题' },
+  { title: '细分场景/人群推荐稿', description: '承接场景化、长尾和人群细分问题' },
+];
+
 const StageExecutionTask: React.FC<{
   activeStep: number;
   icon: React.ElementType;
   steps: string[];
   subtitle?: string;
   title: string;
-}> = ({ activeStep, icon: Icon, steps, subtitle, title }) => (
-  <Task className="mb-5 rounded-2xl bg-white/60 p-4 dark:bg-[#1f1f1f]/70" defaultOpen>
-    <TaskTrigger title={title}>
-      <div className="flex w-full cursor-pointer items-center justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 text-[14px] font-bold text-primary">
-            <Icon className="size-4 text-secondary" />
-            {title}
+  children?: React.ReactNode;
+}> = ({ activeStep, children, icon: Icon, steps, subtitle, title }) => {
+  const displayActiveStep = Math.min(Math.max(activeStep, 0), Math.max(steps.length - 1, 0));
+  return (
+    <Task className="mb-5 rounded-2xl bg-white/60 p-4 dark:bg-[#1f1f1f]/70" defaultOpen>
+      <TaskTrigger title={title}>
+        <div className="flex w-full cursor-pointer items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-[14px] font-bold text-primary">
+              <Icon className="size-4 text-secondary" />
+              <span>{title}</span>
+            </div>
+            {subtitle && <p className="mt-1 text-[12px] text-on-surface-variant">{subtitle}</p>}
           </div>
-          {subtitle && <p className="mt-1 text-[12px] text-on-surface-variant">{subtitle}</p>}
+          <span className="flex shrink-0 gap-1">
+            {[0, 1, 2].map((index) => (
+              <motion.span
+                key={index}
+                className="size-1.5 rounded-full bg-secondary/80"
+                animate={{ opacity: [0.25, 1, 0.25] }}
+                transition={{ duration: 0.9, repeat: Infinity, delay: index * 0.16 }}
+              />
+            ))}
+          </span>
         </div>
-        <span className="flex shrink-0 gap-1">
-          {[0, 1, 2].map((index) => (
-            <motion.span
-              key={index}
-              className="size-1.5 rounded-full bg-secondary/80"
-              animate={{ opacity: [0.25, 1, 0.25] }}
-              transition={{ duration: 0.9, repeat: Infinity, delay: index * 0.16 }}
-            />
-          ))}
-        </span>
-      </div>
-    </TaskTrigger>
-    <TaskContent className="mt-3">
-      {steps.map((step, index) => {
-        const isActive = index === activeStep;
-        const isDone = index < activeStep;
-        return (
-          <TaskItem
-            className={cn(
-              'flex items-center gap-2 rounded-xl px-3 py-2 text-[12px] transition-colors',
-              isActive && 'bg-[#eef6ff] text-[#1167d8] dark:bg-[#17324d] dark:text-[#9fcfff]',
-              isDone && 'text-[#0b8f84]',
-              !isActive && !isDone && 'text-on-surface-variant/70'
-            )}
-            key={step}
-          >
-            {isDone ? <Check className="size-3.5" /> : <span className={cn('size-2 rounded-full', isActive ? 'bg-secondary' : 'bg-outline-variant')} />}
-            <span className="font-semibold">{step}</span>
-            {isActive && <span className="ml-auto text-[11px]">进行中</span>}
-          </TaskItem>
-        );
-      })}
-    </TaskContent>
-  </Task>
-);
+      </TaskTrigger>
+      <TaskContent className="mt-3">
+        {steps.map((step, index) => {
+          const isActive = index === displayActiveStep;
+          const isDone = index < displayActiveStep;
+          return (
+            <TaskItem
+              className={cn(
+                'flex items-center gap-2 rounded-xl px-3 py-2 text-[12px] transition-colors',
+                isActive && 'bg-[#eef6ff] text-[#1167d8] dark:bg-[#17324d] dark:text-[#9fcfff]',
+                isDone && 'text-[#0b8f84]',
+                !isActive && !isDone && 'text-on-surface-variant/70'
+              )}
+              key={step}
+            >
+              {isDone ? <Check className="size-3.5" /> : <span className={cn('size-2 rounded-full', isActive ? 'bg-secondary' : 'bg-outline-variant')} />}
+              <span className="font-semibold">{step}</span>
+              {isActive && <span className="ml-auto text-[11px]">进行中</span>}
+            </TaskItem>
+          );
+        })}
+        {children}
+      </TaskContent>
+    </Task>
+  );
+};
 
 const PhaseTwoReportRunning: React.FC<{
   execution: NonNullable<ChatMessage['phaseTwoExecution']>;
@@ -2717,6 +2870,78 @@ const SourceDiscoveryRunning: React.FC<{
   />
 );
 
+const ArticleDraftQueue: React.FC<{
+  activeStep: number;
+}> = ({ activeStep }) => {
+  const completedCount = Math.min(Math.max(activeStep, 0), ARTICLE_DRAFT_QUEUE_ITEMS.length);
+  const activeIndex = activeStep >= 0 && activeStep < ARTICLE_DRAFT_QUEUE_ITEMS.length ? activeStep : -1;
+  return (
+    <Queue className="mt-3 border-0 bg-transparent px-0 pb-0 pt-0 shadow-none">
+      <QueueSection defaultOpen>
+        <QueueSectionTrigger className="bg-surface-container-low/85 px-3 py-2 text-on-surface hover:bg-surface-container dark:bg-[#202020]">
+          <QueueSectionLabel
+            count={ARTICLE_DRAFT_QUEUE_ITEMS.length}
+            icon={<FileText className="size-3.5 text-secondary" />}
+            label="篇内容资产队列"
+          />
+          <span className="text-[11px] font-medium text-on-surface-variant">
+            {completedCount}/{ARTICLE_DRAFT_QUEUE_ITEMS.length} 已完成
+          </span>
+        </QueueSectionTrigger>
+        <QueueSectionContent>
+          <QueueList className="mt-2">
+            {ARTICLE_DRAFT_QUEUE_ITEMS.map((item, index) => {
+              const isActive = index === activeIndex;
+              const isCompleted = index < completedCount;
+              return (
+                <QueueItem
+                  className={cn(
+                    'px-3 py-2 hover:bg-surface-container-low',
+                    isActive && 'bg-[#eef6ff] dark:bg-[#17324d]'
+                  )}
+                  key={item.title}
+                >
+                  <div className="flex items-start gap-2">
+                    <QueueItemIndicator
+                      className={cn(isActive && 'border-secondary bg-secondary')}
+                      completed={isCompleted}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <QueueItemContent
+                        className={cn(
+                          'text-[12px] font-semibold',
+                          isActive && 'text-[#1167d8] dark:text-[#9fcfff]',
+                          isCompleted ? 'text-[#0b8f84]' : !isActive && 'text-on-surface-variant'
+                        )}
+                      >
+                        {item.title}
+                      </QueueItemContent>
+                      <QueueItemDescription
+                        className={cn('ml-0 mt-0.5', isCompleted && 'text-[#0b8f84]/70')}
+                      >
+                        {item.description}
+                      </QueueItemDescription>
+                    </div>
+                    <span
+                      className={cn(
+                        'shrink-0 text-[11px] font-medium',
+                        isActive ? 'text-[#1167d8] dark:text-[#9fcfff]' : 'text-on-surface-variant/70',
+                        isCompleted && 'text-[#0b8f84]'
+                      )}
+                    >
+                      {isCompleted ? '已完成' : isActive ? '生成中' : '待生成'}
+                    </span>
+                  </div>
+                </QueueItem>
+              );
+            })}
+          </QueueList>
+        </QueueSectionContent>
+      </QueueSection>
+    </Queue>
+  );
+};
+
 const ArticleDraftRunning: React.FC<{
   execution: NonNullable<ChatMessage['articleDraftExecution']>;
 }> = ({ execution }) => (
@@ -2726,7 +2951,9 @@ const ArticleDraftRunning: React.FC<{
     steps={ARTICLE_DRAFT_STEPS}
     subtitle="这一步只生成排行榜前置支撑内容，不生成排行榜文章。"
     title={`正在生成${platformLabelFor(execution.platform)}阶段四内容资产`}
-  />
+  >
+    <ArticleDraftQueue activeStep={execution.activeStep} />
+  </StageExecutionTask>
 );
 
 const GeoCheckReportCard: React.FC<{ report: GeoAgentGeoReport }> = ({ report }) => {
@@ -2781,6 +3008,9 @@ const SourceDiscoveryCard: React.FC<{ discovery: GeoAgentGeoSourceDiscovery }> =
   const platformLabel = platformLabelFor(discovery.platform === 'deepseek' ? 'deepseek' : 'doubao');
   const verifiedSources = (discovery.discovery.verified_observed_sources ?? discovery.discovery.observed_citation_sources ?? []) as unknown[];
   const candidateSources = (discovery.discovery.channel_priorities ?? discovery.discovery.candidate_sources ?? discovery.discovery.ai_recommended_sources ?? []) as unknown[];
+  const searchedQuestionCount = Number(discovery.discovery.searched_question_count ?? 0);
+  const skippedQuestionCount = Number(discovery.discovery.skipped_question_count ?? 0);
+  const searchedQuestions = (discovery.discovery.searched_questions ?? []) as unknown[];
   if (discovery.discovery.status === 'failed') {
     return (
       <div className="mb-5 rounded-2xl bg-red-50 p-4 text-[13px] text-red-700 dark:bg-red-950/30 dark:text-red-200">
@@ -2802,9 +3032,17 @@ const SourceDiscoveryCard: React.FC<{ discovery: GeoAgentGeoSourceDiscovery }> =
       <div className="rounded-2xl bg-[#eef6ff] p-4 text-[13px] leading-relaxed text-[#174d88] dark:bg-[#17324d] dark:text-[#c9e4ff]">
         <div className="font-bold">第三步主要做什么？</div>
         <p className="mt-1">
-          它不是写文章，也不是发布计划；它是在盘点哪些来源已有可核验证据，哪些信源还只是待验证候选。
+          它不是写文章，也不是发布计划；它只实测最关键的排行榜/推荐问题，用来判断哪些来源已有可核验证据。
         </p>
+        {searchedQuestionCount > 0 && (
+          <p className="mt-2 font-semibold">
+            本次实测 {searchedQuestionCount} 条问题{skippedQuestionCount > 0 ? `，其余 ${skippedQuestionCount} 条保留为后续内容与检测输入。` : '。'}
+          </p>
+        )}
       </div>
+      {searchedQuestions.length > 0 && (
+        <ReportSection title="本次实测问题" items={searchedQuestions} limit={3} compact />
+      )}
       {verifiedSources.length > 0 ? (
         <ReportSection title="已验证引用来源" items={verifiedSources} limit={5} variant="strong" />
       ) : (
@@ -3261,7 +3499,9 @@ const formatUsageValue = (value: unknown) => {
 
 const ThinkingIndicator: React.FC<{ label: string }> = ({ label }) => (
   <div className="flex items-center gap-2.5 text-on-surface-variant">
-    <span className="text-[13px] font-medium">{label || '正在思考'}</span>
+    <Shimmer as="span" className="text-[13px] font-medium [--color-muted-foreground:var(--color-on-surface-variant)]" duration={1.5} spread={1.35}>
+      {label || '正在思考'}
+    </Shimmer>
     <span className="flex gap-1">
       {[0, 1, 2].map((index) => (
         <motion.span
@@ -3275,7 +3515,26 @@ const ThinkingIndicator: React.FC<{ label: string }> = ({ label }) => (
   </div>
 );
 
+const StreamingTailIndicator: React.FC<{ label: string }> = ({ label }) => (
+  <div className="mt-3 flex items-center gap-2.5 text-on-surface-variant">
+    <Shimmer as="span" className="text-[12px] font-medium [--color-muted-foreground:var(--color-on-surface-variant)]" duration={1.5} spread={1.2}>
+      {`仍在执行：${label || '正在等待模型继续输出'}`}
+    </Shimmer>
+    <span className="flex gap-1">
+      {[0, 1, 2].map((index) => (
+        <motion.span
+          key={index}
+          className="size-1 rounded-full bg-secondary/70"
+          animate={{ opacity: [0.25, 1, 0.25] }}
+          transition={{ duration: 0.9, repeat: Infinity, delay: index * 0.16 }}
+        />
+      ))}
+    </span>
+  </div>
+);
+
 function restoreConversationMessage(message: GeoAgentConversationMessage): ChatMessage {
+  const messageProjectId = (message as { project_id?: string }).project_id;
   const baseMessage = {
     id: message.id,
     role: message.role as 'user' | 'assistant',
@@ -3322,6 +3581,36 @@ function restoreConversationMessage(message: GeoAgentConversationMessage): ChatM
     const sourceDiscovery = metadata.source_discovery as GeoAgentGeoSourceDiscovery | undefined;
     const supportArticles = metadata.support_articles as GeoAgentGeoSupportArticleRunResponse | undefined;
     const isPendingPrompt = Boolean(project && confirmationState === 'approval-requested' && metadata.status === 'pending');
+    const phase = Number(metadata.phase || 0);
+    if (metadata.status === 'streaming') {
+      return {
+        ...baseMessage,
+        content: message.content,
+        geoProjectId: messageProjectId ? `geo-${messageProjectId}` : undefined,
+        phaseTwoPlatform: platform,
+        phaseTwoExecution: phase === 2
+          ? { platform, companyName: project?.company_name || '企业', activeStep: 0 }
+          : undefined,
+        sourceDiscoveryExecution: phase === 3
+          ? { platform, activeStep: 0 }
+          : undefined,
+        articleDraftExecution: phase === 4
+          ? { platform, activeStep: 0 }
+          : undefined,
+        confirmationState: 'approval-responded',
+        confirmationApproved: true,
+        actionBusy: true,
+        sourceDiscoveryAttempted: phase === 3,
+        status: 'streaming',
+        reasoning: phase === 2
+          ? `正在生成${platformLabelFor(platform)}阶段二排行榜问题池。`
+          : phase === 3
+            ? `正在发现${platformLabelFor(platform)}高权重信源。`
+            : phase === 4
+              ? `正在生成${platformLabelFor(platform)}阶段四 9 篇内容资产。`
+              : undefined,
+      };
+    }
     return {
       ...baseMessage,
       content: message.content,
@@ -3364,6 +3653,7 @@ function restoreConversationMessage(message: GeoAgentConversationMessage): ChatM
     return {
       ...baseMessage,
       content: message.content,
+      geoProjectId: messageProjectId ? `geo-${messageProjectId}` : undefined,
       phaseTwoPlatform: platform,
       geoReport,
       sourceDiscovery,

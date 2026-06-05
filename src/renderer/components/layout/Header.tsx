@@ -160,8 +160,6 @@ export function Header({ currentView, isSidebarCollapsed }: HeaderProps) {
 
   const openConversation = (conversationId: string) => {
     window.dispatchEvent(new CustomEvent('geo-agent-open-conversation', { detail: { id: conversationId } }));
-    setCurrentConversationId(conversationId);
-    localStorage.setItem(currentConversationStorageKey, conversationId);
     setIsHistoryOpen(false);
   };
 

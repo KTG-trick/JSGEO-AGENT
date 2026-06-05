@@ -86,6 +86,8 @@ function normalizeConfirmedQuestions(questionSetRow, fallbackReport) {
         question: normalizeText(candidate?.question || candidate?.query || candidate?.title || item),
         intent: normalizeText(candidate?.intent),
         keyword_layer: normalizeText(candidate?.keyword_layer),
+        priority: Number(candidate?.priority || 0),
+        ranking_bias: normalizeText(candidate?.ranking_bias),
       };
     }
     if (item && typeof item === 'object') {
@@ -95,6 +97,8 @@ function normalizeConfirmedQuestions(questionSetRow, fallbackReport) {
         question: normalizeText(item.question || item.query || item.title || item.text),
         intent: normalizeText(item.intent),
         keyword_layer: normalizeText(item.keyword_layer),
+        priority: Number(item.priority || 0),
+        ranking_bias: normalizeText(item.ranking_bias),
       };
     }
     return null;
@@ -113,6 +117,94 @@ function normalizeConfirmedQuestions(questionSetRow, fallbackReport) {
     throw new Error('请先在阶段二确认 6-10 条核心问题，再执行阶段三豆包助手联网信源发现。');
   }
   return unique;
+}
+
+function questionSourceFrom(questionSetRow, fallbackReport) {
+  return questionSetRow
+    ? parseJson(questionSetRow.questions_json, {})
+    : fallbackReport?.questions || fallbackReport?.report || fallbackReport || {};
+}
+
+function sourceQuestionIndex(source = {}, confirmedQuestions = []) {
+  const pool = [
+    ...(Array.isArray(source.candidate_questions) ? source.candidate_questions : []),
+    ...(Array.isArray(source.question_pool) ? source.question_pool : []),
+    ...confirmedQuestions,
+  ];
+  const byId = new Map();
+  pool.forEach((item, index) => {
+    if (!item || typeof item !== 'object') return;
+    const id = normalizeText(item.id) || `q${index + 1}`;
+    byId.set(id, item);
+  });
+  return byId;
+}
+
+function normalizeQuestionCandidate(item, index, candidateById) {
+  if (typeof item === 'string') {
+    const candidate = candidateById.get(item);
+    return {
+      id: item,
+      question: normalizeText(candidate?.question || candidate?.query || candidate?.title || item),
+      intent: normalizeText(candidate?.intent),
+      keyword_layer: normalizeText(candidate?.keyword_layer),
+      priority: Number(candidate?.priority || 0),
+      ranking_bias: normalizeText(candidate?.ranking_bias),
+    };
+  }
+  if (!item || typeof item !== 'object') return null;
+  const id = normalizeText(item.id) || `q${index + 1}`;
+  const candidate = candidateById.get(id) || item;
+  return {
+    id,
+    question: normalizeText(item.question || item.query || item.title || item.text || candidate.question || candidate.query || candidate.title),
+    intent: normalizeText(item.intent || candidate.intent),
+    keyword_layer: normalizeText(item.keyword_layer || candidate.keyword_layer),
+    priority: Number(item.priority || candidate.priority || 0),
+    ranking_bias: normalizeText(item.ranking_bias || candidate.ranking_bias),
+  };
+}
+
+function sourceDiscoveryQuestionScore(question, sourceRank = 0) {
+  const text = [
+    question.intent,
+    question.keyword_layer,
+    question.ranking_bias,
+    question.question,
+  ].join(' ').toLowerCase();
+  let score = sourceRank ? 200 - sourceRank : 0;
+  if (/ranking|rank|recommend|ranking_rec|排行|排名|榜单|推荐|哪家|口碑|性价比/.test(text)) score += 80;
+  if (/comparison|compare|对比|比较/.test(text)) score += 45;
+  if (/core|regional|核心|区域/.test(text)) score += 20;
+  score += Math.max(0, Math.min(Number(question.priority || 0), 10));
+  return score;
+}
+
+function uniqueQuestions(questions = []) {
+  const seen = new Set();
+  return questions.filter((question) => {
+    if (!question?.question) return false;
+    const key = question.id || question.question;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function selectSourceDiscoveryQuestions(questionSetRow, fallbackReport, confirmedQuestions, limit = 3) {
+  const source = questionSourceFrom(questionSetRow, fallbackReport);
+  const candidateById = sourceQuestionIndex(source, confirmedQuestions);
+  const rankingQuestions = Array.isArray(source.ranking_questions) ? source.ranking_questions : [];
+  const preferred = rankingQuestions
+    .map((item, index) => normalizeQuestionCandidate(item, index, candidateById))
+    .filter(Boolean)
+    .map((question, index) => ({ ...question, _score: sourceDiscoveryQuestionScore(question, index + 1) }));
+  const rankedConfirmed = confirmedQuestions
+    .map((question) => ({ ...question, _score: sourceDiscoveryQuestionScore(question) }))
+    .sort((left, right) => right._score - left._score);
+  return uniqueQuestions([...preferred, ...rankedConfirmed, ...confirmedQuestions])
+    .slice(0, Math.max(1, Number(limit) || 3))
+    .map(({ _score, ...question }) => question);
 }
 
 function profileToPrompt(profile = {}) {
@@ -532,10 +624,11 @@ function aggregateChannels({ preferenceRun, questionRuns, questions }) {
   return channels;
 }
 
-function buildDiscovery({ preferenceRun, questionRuns, questions, streamMeta = {} }) {
+function buildDiscovery({ preferenceRun, questionRuns, questions, searchedQuestions, streamMeta = {} }) {
   const observedCitationSources = questionRuns.flatMap((run) => run.cited_urls || []);
   const verifiedObservedSources = observedCitationSources.filter((item) => item.url);
   const channelPriorities = aggregateChannels({ preferenceRun, questionRuns, questions });
+  const effectiveSearchedQuestions = searchedQuestions || questions;
   const missingEvidence = questionRuns
     .filter((run) => !Array.isArray(run.cited_urls) || run.cited_urls.length === 0)
     .map((run) => `问题「${run.question}」未观察到可核验 URL。`);
@@ -543,10 +636,13 @@ function buildDiscovery({ preferenceRun, questionRuns, questions, streamMeta = {
   return {
     evidence_mode: EVIDENCE_MODE,
     source_result_origin: SOURCE_ORIGIN,
-    summary: `已使用豆包助手联网搜索观察 ${questionRuns.length} 条核心问题，提取 ${verifiedObservedSources.length} 条可核验 URL，形成 ${channelPriorities.length} 个发布渠道优先级。`,
+    summary: `已使用豆包助手联网搜索观察 ${questionRuns.length} 条排行榜/推荐问题，提取 ${verifiedObservedSources.length} 条可核验 URL，形成 ${channelPriorities.length} 个发布渠道优先级。`,
     status: 'completed',
     input_confirmed_questions: questions,
     input_questions: questions.map((item) => item.question),
+    searched_questions: effectiveSearchedQuestions,
+    searched_question_count: effectiveSearchedQuestions.length,
+    skipped_question_count: Math.max(0, questions.length - effectiveSearchedQuestions.length),
     ai_stated_preferences: preferenceRun,
     observed_search_runs: questionRuns,
     observed_citation_sources: observedCitationSources,
@@ -643,13 +739,14 @@ async function buildAndSaveDiscovery({ geoProjectId, projectId, questionSetId = 
   const questionSetRow = questionSetId
     ? getDb().prepare('SELECT * FROM geo_question_sets WHERE id = ? AND project_id = ?').get(questionSetId, enterpriseProjectId)
     : getLatestQuestionSet(enterpriseProjectId, platform);
-  const questions = normalizeConfirmedQuestions(questionSetRow, fallbackReport);
+  const confirmedQuestions = normalizeConfirmedQuestions(questionSetRow, fallbackReport);
+  const questions = selectSourceDiscoveryQuestions(questionSetRow, fallbackReport, confirmedQuestions, 3);
 
   onEvent?.({
     type: 'status',
     step_index: 0,
     step_label: '准备豆包助手联网搜索',
-    message: `阶段三将统一使用豆包助手联网搜索 ${questions.length} 条核心问题。`,
+    message: `阶段三将统一使用豆包助手联网搜索 ${questions.length} 条排行榜/推荐问题。`,
   });
 
   const preferenceRun = await runPreferenceSearch({ profile, questions, onEvent });
@@ -688,7 +785,8 @@ async function buildAndSaveDiscovery({ geoProjectId, projectId, questionSetId = 
   const discoveryJson = buildDiscovery({
     preferenceRun,
     questionRuns,
-    questions,
+    questions: confirmedQuestions,
+    searchedQuestions: questions,
     streamMeta: preferenceRun,
   });
 
@@ -812,4 +910,5 @@ module.exports = {
   getLatestSourceDiscovery,
   getSourceDiscovery,
   listSourceDiscoveries,
+  selectSourceDiscoveryQuestions,
 };

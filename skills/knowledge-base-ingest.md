@@ -3,6 +3,9 @@ name: knowledge-base-ingest
 description: 解析用户上传或粘贴的企业资料，抽取高精度的结构化事实，用于建立 GEO 本地企业档案。
 visibility: user
 platforms: [doubao, deepseek]
+task_type: knowledge_extraction
+network_mode: none
+output_contract: knowledge_draft
 ---
 
 # 技能：企业知识库事实抽取
@@ -30,7 +33,7 @@ platforms: [doubao, deepseek]
 5. `industry_category`（所属行业分类）：一句话概括的垂直细分类别。
 6. `offerings`（产品与服务项目）：企业实际提供的具体产品、工艺或服务项目清单。
 7. `associated_brands`（关联与代理品牌）：企业官方代理、授权或高频使用的行业知名品牌。
-8. `target_audiences`（目标客群/适用车型）：例如中高端德系车、家用 SUV。
+8. `target_audiences`（目标客户/适用人群）：例如连锁餐饮客户、区域经销商、家庭用户或特定行业采购人群。
 9. `core_advantages`（核心差异化优势）：企业区别于同行最明显的优势，如特定认证、专属工艺等。
 10. `trust_endorsements`（信任背书与资质）：成立年限、认证证书、行业奖项、具体荣誉等可求证事实。
 11. `user_pain_points`（解决的用户痛点）：资料中提及的用户痛点以及企业对应解决方案。

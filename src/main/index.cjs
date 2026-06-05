@@ -569,7 +569,7 @@ function registerHandlers() {
     }
   });
   ipcMain.handle('geo-agent:confirm-knowledge-draft', async (_event, payload = {}) => {
-    const response = knowledgeService.confirmKnowledgeDraft(payload);
+    const response = await knowledgeService.confirmKnowledgeDraft(payload);
     const projectId = response.project_id;
     if (projectId) {
       try {
@@ -602,6 +602,10 @@ function registerHandlers() {
             kind: 'geo_workflow',
           });
         }
+        conversationService.updateConversationTitle(
+          conversation.id,
+          `${fieldText(response.profile || {}, 'company_name') || response.profile.company_name || '企业'} GEO 优化`
+        );
         payload.conversationId = conversation.id;
         const confirmedDraftMessage = conversationService.markKnowledgeDraftConfirmed({
           conversationId: conversation.id,
@@ -841,6 +845,35 @@ function registerHandlers() {
           firstMessage: '发现高权重信源',
           kind: 'geo_workflow',
         });
+        const runningMessage = conversationService.findRunningPhaseMessage({
+          conversationId: conversation.id,
+          projectId,
+          phase: 3,
+          platform: payload.platform,
+        });
+        if (runningMessage) {
+          event.sender.send(channel, {
+            type: 'meta',
+            platform: payload.platform,
+            phase: 3,
+            conversation_id: conversation.id,
+            message: runningMessage,
+          });
+          event.sender.send(channel, {
+            type: 'done',
+            status: 'already_running',
+            already_running: true,
+            conversation_id: conversation.id,
+            message: runningMessage,
+          });
+          return {
+            type: 'done',
+            status: 'already_running',
+            already_running: true,
+            conversation_id: conversation.id,
+            message: runningMessage,
+          };
+        }
         stageMessage = conversationService.addMessage({
           conversationId: conversation.id,
           projectId,
@@ -1080,12 +1113,33 @@ function registerHandlers() {
         title: `${platform === 'doubao' ? '璞嗗寘' : 'DeepSeek'} 闃舵浜岄棶棰樻睜鐢熸垚`,
         kind: 'geo_workflow',
       });
+      let runningPromptMessage = null;
+      if (messageId) {
+        try {
+          runningPromptMessage = conversationService.updateConversationMessage({
+            messageId,
+            conversationId: conversation.id,
+            projectId,
+            content: `正在生成${platform === 'doubao' ? '豆包' : 'DeepSeek'}阶段二排行榜问题池。`,
+            metadata: {
+              type: 'geo_phase_prompt',
+              platform,
+              phase: 2,
+              status: 'streaming',
+              confirmation_state: 'approval-responded',
+              confirmation_approved: true,
+            },
+          });
+        } catch {
+          runningPromptMessage = null;
+        }
+      }
 
       // 鍙戦€?meta 浜嬩欢
       event.sender.send(channel, {
         type: 'meta',
         conversation_id: conversation.id,
-        message: { id: messageId || `assistant-${Date.now()}`, role: 'assistant', content: '' },
+        message: runningPromptMessage || { id: messageId || `assistant-${Date.now()}`, role: 'assistant', content: '' },
       });
 
       // 璋冪敤娴佸紡鐢熸垚
@@ -1113,6 +1167,26 @@ function registerHandlers() {
           confirmation_state: 'output-available',
         },
       });
+      if (messageId) {
+        try {
+          conversationService.updateConversationMessage({
+            messageId,
+            conversationId: conversation.id,
+            projectId,
+            content: `已完成${platform === 'doubao' ? '豆包' : 'DeepSeek'}阶段二排行榜问题池。`,
+            metadata: {
+              type: 'geo_phase_prompt',
+              platform,
+              phase: 2,
+              status: 'completed',
+              confirmation_state: 'output-available',
+              confirmation_approved: true,
+            },
+          });
+        } catch {
+          // 阶段二结果消息已保存，提示消息更新失败不阻断主流程。
+        }
+      }
 
       // 鍙戦€?done 浜嬩欢
       event.sender.send(channel, {
@@ -1195,6 +1269,35 @@ function registerHandlers() {
           firstMessage: '生成阶段四内容资产',
           kind: 'geo_workflow',
         });
+        const runningMessage = conversationService.findRunningPhaseMessage({
+          conversationId: conversation.id,
+          projectId,
+          phase: 4,
+          platform: payload.platform || 'doubao',
+        });
+        if (runningMessage) {
+          event.sender.send(channel, {
+            type: 'meta',
+            platform: payload.platform,
+            phase: 4,
+            conversation_id: conversation.id,
+            message: runningMessage,
+          });
+          event.sender.send(channel, {
+            type: 'done',
+            status: 'already_running',
+            already_running: true,
+            conversation_id: conversation.id,
+            message: runningMessage,
+          });
+          return {
+            type: 'done',
+            status: 'already_running',
+            already_running: true,
+            conversation_id: conversation.id,
+            message: runningMessage,
+          };
+        }
         if (!options.messageId) {
           stageMessage = conversationService.addMessage({
             conversationId: conversation.id,

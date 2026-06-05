@@ -3,6 +3,9 @@ name: geo-support-content
 description: 基于企业知识库、10 条核心问题和豆包助手信源发现结果，生成 GEO 支撑文章与排行榜文章草稿。用户需要写文章、生成支撑内容、生成排行榜稿件、生成首轮 9 篇内容资产时使用此技能。
 visibility: internal
 platforms: [doubao, deepseek]
+task_type: support_content_generation
+network_mode: none
+output_contract: geo_article_draft
 ---
 
 # GEO 内容资产生成

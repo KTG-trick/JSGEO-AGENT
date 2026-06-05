@@ -54,6 +54,9 @@ function loadSkill(skillName) {
     description: meta.description || '',
     visibility: meta.visibility || 'internal',
     platforms: meta.platforms || ['doubao', 'deepseek'],
+    task_type: meta.task_type || null,
+    network_mode: meta.network_mode || null,
+    output_contract: meta.output_contract || null,
     path: `file://${filePath}`,
     content: body,
   };

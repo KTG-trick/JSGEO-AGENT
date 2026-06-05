@@ -37,7 +37,7 @@ const FACT_PATTERNS = [
   { field: 'offerings', label: '产品与服务项目', pattern: /(?:主营业务|业务范围|核心业务|产品服务|产品与服务|服务内容|解决方案)[:：]\s*([^\n]{4,700})/i, confidence: 0.82 },
   { field: 'detailed_address', label: '详细经营地址', pattern: /(?:详细地址|经营地址|门店地址|地址)[:：]\s*([^\n]{4,300})/i, confidence: 0.86 },
   { field: 'associated_brands', label: '关联与代理品牌', pattern: /(?:代理品牌|授权品牌|合作品牌|关联品牌)[:：]\s*([^\n]{2,500})/i, confidence: 0.78 },
-  { field: 'target_audiences', label: '目标客群', pattern: /(?:目标客群|适用车型|服务车主|目标用户)[:：]\s*([^\n]{2,500})/i, confidence: 0.74 },
+  { field: 'target_audiences', label: '目标客户/适用人群', pattern: /(?:目标客群|目标客户|适用人群|适用车型|服务车主|目标用户)[:：]\s*([^\n]{2,500})/i, confidence: 0.74 },
   { field: 'user_pain_points', label: '用户痛点', pattern: /(?:用户痛点|客户痛点|解决痛点|痛点)[:：]\s*([^\n]{4,700})/i, confidence: 0.72 },
   { field: 'trust_endorsements', label: '信任背书', pattern: /(?:信任背书|资质|认证|荣誉|授权|合作伙伴)[:：]\s*([^\n]{4,700})/i, confidence: 0.72 },
   { field: 'proven_cases', label: '客户案例', pattern: /(?:客户案例|成功案例|案例)[:：]\s*([^\n]{4,700})/i, confidence: 0.74 },
@@ -75,6 +75,16 @@ function safeFilename(filename = '') {
 function decodeAssetBuffer(asset = {}) {
   const rawBase64 = String(asset.content_base64 || '').replace(/^data:[^,]+,/, '');
   return Buffer.from(rawBase64, 'base64');
+}
+
+function draftAssetsForStorage(assets = []) {
+  return (Array.isArray(assets) ? assets : [])
+    .map((asset) => ({
+      filename: asset.filename || 'untitled.txt',
+      content_type: asset.content_type || asset.mediaType || null,
+      content_base64: asset.content_base64 || null,
+    }))
+    .filter((asset) => asset.content_base64);
 }
 
 function dataRootDir() {
@@ -141,6 +151,24 @@ function normalizeProfile(profile = {}) {
   normalized.project_id = profile.project_id;
   normalized.company_name = toEvidenceField(profile.company_name || profileCompanyName(profile));
   return normalized;
+}
+
+function mergeFilledProfiles(...profiles) {
+  const output = {};
+  profiles.forEach((profile) => {
+    if (!profile) return;
+    PROFILE_FIELD_KEYS.forEach((field) => {
+      if (fieldText(profile, field)) {
+        output[field] = profile[field];
+      }
+    });
+    ['id', 'project_id', 'generated_long_tail_keywords'].forEach((field) => {
+      if (profile[field]) {
+        output[field] = profile[field];
+      }
+    });
+  });
+  return output;
 }
 
 function buildProfileContent(profile = {}) {
@@ -834,11 +862,11 @@ async function createKnowledgeDraft(payload = {}) {
   db.prepare(`
     INSERT INTO knowledge_drafts (
       id, project_id, status, input_text, facts_json, field_reviews_json,
-      profile_json, source_quotes_json, warnings_json, created_at, updated_at
+      profile_json, source_quotes_json, assets_json, warnings_json, created_at, updated_at
     )
     VALUES (
       @id, @project_id, 'pending', @input_text, @facts_json, @field_reviews_json,
-      @profile_json, @source_quotes_json, @warnings_json, @created_at, @updated_at
+      @profile_json, @source_quotes_json, @assets_json, @warnings_json, @created_at, @updated_at
     )
   `).run({
     id: draftId,
@@ -848,6 +876,7 @@ async function createKnowledgeDraft(payload = {}) {
     field_reviews_json: jsonString(fieldReviews),
     profile_json: jsonString(profile),
     source_quotes_json: jsonString(sourceQuotes),
+    assets_json: jsonString(draftAssetsForStorage(payload.assets)),
     warnings_json: jsonString(warnings),
     created_at: timestamp,
     updated_at: timestamp,
@@ -889,15 +918,20 @@ function getDraft(draftId) {
   return row;
 }
 
-function confirmKnowledgeDraft(payload = {}) {
+async function confirmKnowledgeDraft(payload = {}) {
   const draftId = payload.draftId || payload.id;
   if (!draftId) throw new Error('draftId is required.');
 
   const draft = getDraft(draftId);
   const draftProfile = normalizeProfile(parseJson(draft.profile_json, {}));
-  const profile = normalizeProfile({ ...draftProfile, ...(payload.profile || {}) });
+  const existingProfile = projectExists(draft.project_id)
+    ? getKnowledgeProfile(draft.project_id).profile
+    : null;
+  const payloadProfile = normalizeProfile(payload.profile || {});
+  const profile = normalizeProfile(mergeFilledProfiles(existingProfile, draftProfile, payloadProfile));
   const response = saveProfile({ ...profile, project_id: projectExists(draft.project_id) ? draft.project_id : profile.project_id });
   const projectId = response.profile.project_id || response.profile.id;
+  const draftAssets = draftAssetsForStorage(parseJson(draft.assets_json, []));
 
   getDb().prepare(`
     UPDATE knowledge_drafts
@@ -907,13 +941,23 @@ function confirmKnowledgeDraft(payload = {}) {
     WHERE id = @id
   `).run({ id: draftId, project_id: projectId, updated_at: nowIso() });
 
+  for (const asset of draftAssets) {
+    await createKnowledgeAsset({
+      project_id: projectId,
+      filename: asset.filename,
+      content_type: asset.content_type,
+      content_base64: asset.content_base64,
+    });
+  }
+
+  const refreshed = getKnowledgeProfile(projectId);
   return {
     ok: true,
     project_id: projectId,
-    profile: response.profile,
-    entries: response.entries,
-    total: response.total,
-    index_status: response.index_status,
+    profile: refreshed.profile,
+    entries: refreshed.entries,
+    total: refreshed.total,
+    index_status: refreshed.index_status,
   };
 }
 
@@ -1501,11 +1545,11 @@ async function createKnowledgeDraftStrict(payload = {}, onEvent = null) {
   db.prepare(`
     INSERT INTO knowledge_drafts (
       id, project_id, status, input_text, facts_json, field_reviews_json,
-      profile_json, source_quotes_json, warnings_json, created_at, updated_at
+      profile_json, source_quotes_json, assets_json, warnings_json, created_at, updated_at
     )
     VALUES (
       @id, @project_id, 'pending', @input_text, @facts_json, @field_reviews_json,
-      @profile_json, @source_quotes_json, @warnings_json, @created_at, @updated_at
+      @profile_json, @source_quotes_json, @assets_json, @warnings_json, @created_at, @updated_at
     )
   `).run({
     id: draftId,
@@ -1515,6 +1559,7 @@ async function createKnowledgeDraftStrict(payload = {}, onEvent = null) {
     field_reviews_json: jsonString(fieldReviews),
     profile_json: jsonString(profile),
     source_quotes_json: jsonString(sourceQuotes),
+    assets_json: jsonString(draftAssetsForStorage(payload.assets)),
     warnings_json: jsonString(warnings),
     created_at: timestamp,
     updated_at: timestamp,

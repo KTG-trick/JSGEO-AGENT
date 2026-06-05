@@ -57,7 +57,7 @@ export const PROFILE_FIELD_DEFINITIONS = [
   },
   {
     key: 'target_audiences',
-    label: '目标客群/适用车型',
+    label: '目标客户/适用人群',
     group: '服务与品牌',
     isArray: true,
     aliases: [],

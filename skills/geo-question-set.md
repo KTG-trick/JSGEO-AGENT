@@ -3,6 +3,9 @@ name: geo-question-set
 description: 基于企业知识库和 target_keywords 生成 10 条 GEO 核心用户问题，用于阶段三信源发现、首轮 9 篇稿件生成和 AI 推荐可见性检测。当需要生成问题池、AI 用户提问、排行榜问题、推荐类问题或 GEO 目标词问题时使用。
 visibility: internal
 platforms: [doubao, deepseek]
+task_type: question_pool_generation
+network_mode: web_search_plugin
+output_contract: geo_question_set
 ---
 
 # GEO 核心问题池生成

@@ -213,6 +213,10 @@ declare global {
     name: string;
     description: string;
     visibility?: 'user' | 'internal' | string;
+    platforms?: string[];
+    task_type?: string | null;
+    network_mode?: string | null;
+    output_contract?: string | null;
     path: string;
     content: string;
   };
@@ -340,6 +344,9 @@ declare global {
       evidence_mode?: string;
       source_result_origin?: string;
       input_confirmed_questions?: unknown[];
+      searched_questions?: unknown[];
+      searched_question_count?: number;
+      skipped_question_count?: number;
       ai_stated_preferences?: Record<string, unknown>;
       observed_search_runs?: unknown[];
 	      ai_recommended_sources?: unknown[];
@@ -693,7 +700,7 @@ declare global {
           status?: string;
           error?: string;
         }) => void
-      ) => Promise<{ type: 'done'; status?: string }>;
+      ) => Promise<{ type: 'done'; status?: string; already_running?: boolean; message?: GeoAgentConversationMessage }>;
       getLatestGeoSourceDiscovery: (geoProjectId: string, platform: 'doubao' | 'deepseek') => Promise<GeoAgentGeoSourceDiscovery | null>;
       getGeoSourceDiscovery: (discoveryId: string) => Promise<GeoAgentGeoSourceDiscovery>;
       getSourceDiscoveries: (
@@ -730,7 +737,7 @@ declare global {
           status?: string;
           error?: string;
         }) => void
-      ) => Promise<{ type: 'done'; status?: string }>;
+      ) => Promise<{ type: 'done'; status?: string; already_running?: boolean; message?: GeoAgentConversationMessage }>;
       getLatestGeoArticleDraft: (
         geoProjectId: string,
         platform: 'doubao' | 'deepseek',

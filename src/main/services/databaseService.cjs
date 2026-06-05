@@ -81,6 +81,7 @@ function createSchema(database) {
       field_reviews_json TEXT,
       profile_json TEXT,
       source_quotes_json TEXT,
+      assets_json TEXT,
       warnings_json TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -402,6 +403,12 @@ function migrateSchema(database) {
   addColumn('summary_dirty', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('message_count', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('last_message_preview', 'TEXT');
+
+  const draftColumns = database.prepare('PRAGMA table_info(knowledge_drafts)').all();
+  const draftExisting = new Set(draftColumns.map((column) => column.name));
+  if (!draftExisting.has('assets_json')) {
+    database.exec('ALTER TABLE knowledge_drafts ADD COLUMN assets_json TEXT');
+  }
 
   database.exec(`
     CREATE TABLE IF NOT EXISTS publish_resources (
