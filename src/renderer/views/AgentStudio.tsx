@@ -861,21 +861,24 @@ export function AgentStudio() {
       return;
     }
 
-    const assistantId = `assistant-${Date.now()}`;
     const shouldShowReasoning = shouldUseDispatcher;
+    const timestamp = Date.now();
+    const userMessage: ChatMessage = { id: `user-${timestamp}`, role: 'user', content };
+    const assistantId = `assistant-${timestamp}`;
+    const assistantMessage: ChatMessage = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      reasoning: shouldShowReasoning ? '正在理解 GEO 任务' : undefined,
+      status: 'streaming',
+    };
     setInputValue('');
     setSelectedSkill(null);
     setIsSending(true);
     setMessages((current) => [
       ...current,
-      { id: `user-${Date.now()}`, role: 'user', content },
-      {
-        id: assistantId,
-        role: 'assistant',
-        content: '',
-        reasoning: shouldShowReasoning ? '正在理解 GEO 任务' : undefined,
-        status: 'streaming',
-      },
+      userMessage,
+      assistantMessage,
     ]);
 
     try {
@@ -893,7 +896,7 @@ export function AgentStudio() {
         const assets = await Promise.all(files.map(filePartToKnowledgeAsset));
         const draftPayload = {
           message: content,
-          conversation_id: conversationId,
+          conversation_id: knowledgeIntent === 'create' ? null : conversationId,
           intent: knowledgeIntent,
           project_id: activeProjectId,
           skill_id: activeSkill?.id,
@@ -904,6 +907,17 @@ export function AgentStudio() {
         if (window.geoAgent.createKnowledgeDraftStream) {
           const enqueueKnowledgeTask = (task: () => Promise<void> | void) => enqueueTypewriterTask(typewriterQueuesRef, assistantId, task);
           const finalEvent = await window.geoAgent.createKnowledgeDraftStream(draftPayload, (event) => {
+            if (event.type === 'meta' && event.conversation_id) {
+              setConversationId(event.conversation_id);
+              localStorage.setItem(conversationStorageKey(event.project_id || draftPayload.project_id || null, event.conversation_id), event.conversation_id);
+              window.dispatchEvent(new CustomEvent('geo-agent-conversation-changed', { detail: { id: event.conversation_id } }));
+              if (knowledgeIntent === 'create') {
+                setMessages((current) => {
+                  const currentAssistant = current.find((message) => message.id === assistantId) || assistantMessage;
+                  return [userMessage, currentAssistant];
+                });
+              }
+            }
             if (event.type === 'status' && event.message) {
               enqueueKnowledgeTask(async () => {
                 setMessages((current) => mergeReasoningStep(current, assistantId, {
@@ -1202,12 +1216,13 @@ export function AgentStudio() {
     setInputValue(suggestion);
   };
 
-  const appendPhaseTwoPrompt = async (project: GeoAgentGeoProject, options?: { force?: boolean; platform?: 'doubao' | 'deepseek' }) => {
+  const appendPhaseTwoPrompt = async (project: GeoAgentGeoProject, options?: { force?: boolean; platform?: 'doubao' | 'deepseek'; conversationId?: string | null }) => {
     if (project.current_phase !== 'ready_for_check' && !options?.force) {
       return;
     }
     const platform = options?.platform ?? AUTO_PLATFORM;
-    const key = phaseTwoPromptKey(project.project_id, conversationId, platform);
+    const targetConversationId = options?.conversationId ?? conversationId;
+    const key = phaseTwoPromptKey(project.project_id, targetConversationId, platform);
     if (!options?.force && readPhaseTwoPromptKeys().includes(key)) {
       return;
     }
@@ -1222,7 +1237,7 @@ export function AgentStudio() {
     }
     phaseTwoPromptInFlightRef.current.add(key);
     try {
-      const response = await window.geoAgent.createGeoPhaseTwoPrompt(project.id, platform, conversationId);
+      const response = await window.geoAgent.createGeoPhaseTwoPrompt(project.id, platform, targetConversationId);
       setConversationId(response.conversation_id);
       localStorage.setItem(conversationStorageKey(project.project_id, response.conversation_id), response.conversation_id);
       setMessages((current) => {
@@ -1781,7 +1796,11 @@ export function AgentStudio() {
       }));
       window.dispatchEvent(new CustomEvent('geo-agent-conversations-refresh'));
       if (nextGeoProject?.current_phase === 'ready_for_check') {
-        appendPhaseTwoPrompt(nextGeoProject, { force: true, platform: AUTO_PLATFORM }).catch(() => undefined);
+        appendPhaseTwoPrompt(nextGeoProject, {
+          force: true,
+          platform: AUTO_PLATFORM,
+          conversationId: response.conversation_id || draft.conversation_id || conversationId,
+        }).catch(() => undefined);
       }
     } catch (error) {
       setMessages((current) => updateMessage(current, messageId, {

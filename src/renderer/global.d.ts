@@ -72,6 +72,7 @@ declare global {
     embedding_backend: string;
     pending: number;
     indexed: number;
+    vector_indexed?: number;
     failed: number;
     asset_count: number;
     assets: GeoAgentKnowledgeAsset[];
@@ -693,7 +694,7 @@ declare global {
           error?: string;
         }) => void
       ) => Promise<{ type: 'done'; status?: string }>;
-      getLatestGeoSourceDiscovery: (geoProjectId: string, platform: 'doubao' | 'deepseek') => Promise<GeoAgentGeoSourceDiscovery>;
+      getLatestGeoSourceDiscovery: (geoProjectId: string, platform: 'doubao' | 'deepseek') => Promise<GeoAgentGeoSourceDiscovery | null>;
       getGeoSourceDiscovery: (discoveryId: string) => Promise<GeoAgentGeoSourceDiscovery>;
       getSourceDiscoveries: (
         projectId: string,
@@ -876,6 +877,8 @@ declare global {
           error?: string;
           draft?: GeoAgentKnowledgeDraft;
           message?: GeoAgentConversationMessage;
+          conversation_id?: string | null;
+          project_id?: string | null;
           can_proceed?: boolean;
           step_index?: number;
         }) => void
@@ -884,6 +887,7 @@ declare global {
         draft?: GeoAgentKnowledgeDraft;
         error?: string;
         conversation_id?: string | null;
+        project_id?: string | null;
         message?: GeoAgentConversationMessage;
         can_proceed?: boolean;
       }>;

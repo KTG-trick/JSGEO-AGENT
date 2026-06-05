@@ -3,8 +3,8 @@ const { getDb } = require('./databaseService.cjs');
 const questionPoolService = require('./questionPoolService.cjs');
 const knowledgeService = require('./knowledgeService.cjs');
 const articlePublishService = require('./articlePublishService.cjs');
-const { responsesStream } = require('./llmGateway.cjs');
-const { getTaskPolicy, NETWORK_MODES } = require('./modelPolicyService.cjs');
+const { streamLLM } = require('./llmGateway.cjs');
+const { getTaskPolicy } = require('./modelPolicyService.cjs');
 const { fieldText } = require('./profileFieldService.cjs');
 
 function nowIso() {
@@ -95,7 +95,7 @@ function buildMessages({ profile, question, publishedUrls }) {
       role: 'system',
       content: [
         '你是 GEO 推荐可见性检测助手。',
-        '你必须使用豆包助手联网搜索回答用户问题，并观察目标企业是否被推荐、提及或引用。',
+        '你必须使用模型联网搜索回答用户问题，并观察目标企业是否被推荐、提及或引用。',
         '不要为了照顾目标企业而改写答案；按真实联网搜索结果判断。',
       ].join('\n'),
     },
@@ -167,14 +167,15 @@ async function runVisibilityCheck(geoProjectId, platform = 'doubao', onEvent = n
       question_id: question.id,
       message: `正在检测：${question.question}`,
     });
-    const response = await responsesStream({
+    const response = await streamLLM({
       messages: buildMessages({ profile, question, publishedUrls }),
       temperature: 0.1,
       maxTokens: 5000,
       provider: policy.provider,
       model: policy.model,
-      networkMode: NETWORK_MODES.DOUBAO_ASSISTANT_SEARCH,
-      deepThinking: true,
+      networkMode: policy.network_mode,
+      deepThinking: policy.deep_thinking,
+      apiFamily: policy.api_family,
       taskType: 'visibility_check',
       onEvent: (event) => {
         if (event.type === 'reasoning_delta') onEvent?.(event);
@@ -193,8 +194,8 @@ async function runVisibilityCheck(geoProjectId, platform = 'doubao', onEvent = n
 
   const effectiveCount = questionResults.filter((item) => item.effective_mention).length;
   const result = {
-    evidence_mode: 'doubao_assistant_reasoning_search',
-    source_result_origin: 'doubao_assistant',
+    evidence_mode: 'web_search_plugin',
+    source_result_origin: 'model_web_search',
     target_company: fieldText(profile, 'company_name') || fieldText(profile, 'short_name'),
     checked_questions: questions,
     published_urls: publishedUrls,

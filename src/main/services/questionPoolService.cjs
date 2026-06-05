@@ -99,8 +99,11 @@ ${rulesText}
 - 10 条问题应偏向排行榜、推荐、哪家好、口碑、性价比、对比决策。
 - 本地/区域企业优先生成本地和区域问题，但允许少量更宽泛的问题；全国/ToB/SaaS/供应链企业优先生成全国或行业问题。
 - 不得硬编码城市；只允许使用 detailed_address、business_regions 或 target_keywords 中出现的地域词。
-- 返回一个合法 JSON 对象，必须包含 business_scope、target_keyword_basis、knowledge_basis、candidate_questions、question_pool、recommended_core_questions、confirmed_questions、intent_distribution、keyword_layer_distribution、content_asset_mapping。
-- candidate_questions 必须正好 10 条；recommended_core_questions 必须是 q1-q10；confirmed_questions 必须保存同一批 10 条核心问题。`;
+- 只返回一个合法 JSON 对象，不要 Markdown 代码围栏，不要解释文字。
+- JSON 顶层字段顺序必须优先输出 candidate_questions、question_pool、recommended_core_questions、confirmed_questions，再输出 summary、business_scope、target_keyword_basis、knowledge_basis、intent_distribution、keyword_layer_distribution、content_asset_mapping。
+- candidate_questions 必须正好 10 条；每条至少包含 id、question、intent、keyword_layer、priority、related_keywords、target_keyword_used、scope_reason。
+- recommended_core_questions 必须是 q1-q10；confirmed_questions 必须保存同一批 10 条核心问题。
+- target_keyword_basis、knowledge_basis、content_asset_mapping 请保持简短，避免长篇说明。`;
 
   return [
     {
@@ -340,6 +343,65 @@ function normalizeConfirmedQuestions(candidateQuestions, rawConfirmed) {
     .map((question) => ({ ...question, status: 'confirmed', confirmed: true }));
 }
 
+function firstBalancedJson(content, openChar, closeChar) {
+  const text = String(content || '');
+  const start = text.indexOf(openChar);
+  if (start < 0) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === openChar) depth += 1;
+    if (char === closeChar) {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, index + 1);
+    }
+  }
+
+  return null;
+}
+
+function looksLikeQuestionArray(value) {
+  return Array.isArray(value)
+    && value.some((item) => typeof item === 'string' || Boolean(
+      isRecord(item) && (item.question || item.query || item.text || item.title || item.prompt || item.user_question)
+    ));
+}
+
+function parseQuestionJsonCandidate(candidate, label) {
+  if (!candidate) return null;
+  try {
+    const parsed = JSON.parse(candidate.trim());
+    const normalized = normalizeQuestionPayload(parsed);
+    if (Array.isArray(normalized.candidate_questions) && normalized.candidate_questions.length > 0) {
+      return parsed;
+    }
+  } catch (error) {
+    console.warn(`[question-pool] ${label} JSON parse failed:`, error.message);
+  }
+  return null;
+}
+
 function normalizeQuestionPayload(payload) {
   const source = unwrapQuestionPayload(payload);
   const sourceRecord = isRecord(source) ? source : {};
@@ -388,19 +450,28 @@ function parseQuestionPoolContent(content) {
     console.warn('[question-pool] parseJsonContent failed:', error.message);
   }
 
-  const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)(?:```|$)/i);
   if (codeBlockMatch) {
-    try {
-      return JSON.parse(codeBlockMatch[1].trim());
-    } catch (error) {
-      console.warn('[question-pool] code block JSON parse failed:', error.message);
+    const codeBlockObject = firstBalancedJson(codeBlockMatch[1], '{', '}') || codeBlockMatch[1];
+    const parsedCodeBlock = parseQuestionJsonCandidate(codeBlockObject, 'code block');
+    if (parsedCodeBlock) {
+      return parsedCodeBlock;
     }
   }
 
-  const arrayMatch = text.match(/\[[\s\S]*\]/);
-  if (arrayMatch) {
+  const parsedObject = parseQuestionJsonCandidate(firstBalancedJson(text, '{', '}'), 'balanced object');
+  if (parsedObject) {
+    return parsedObject;
+  }
+
+  const arrayText = firstBalancedJson(text, '[', ']');
+  if (arrayText) {
     try {
-      return JSON.parse(arrayMatch[0]);
+      const parsedArray = JSON.parse(arrayText);
+      if (looksLikeQuestionArray(parsedArray)) {
+        return parsedArray;
+      }
+      console.warn('[question-pool] ignored non-question JSON array.');
     } catch (error) {
       console.warn('[question-pool] array JSON parse failed:', error.message);
     }
@@ -477,7 +548,7 @@ async function repairQuestionPayload({ messages, policy, normalized, reason }) {
   const result = await streamLLM({
     messages: repairMessages,
     temperature: 0,
-    maxTokens: 5000,
+    maxTokens: 8000,
     provider: policy.provider,
     model: policy.model,
     networkMode: policy.network_mode,
@@ -560,14 +631,15 @@ async function generateQuestionPool({ projectId, platform }) {
   const messages = buildQuestionPoolMessages({ profile, platform, evolutionRules });
   const policy = getTaskPolicy('question_pool_generation', { platform });
 
-  const result = await responsesStream({
+  const result = await streamLLM({
     messages,
     temperature: 0.3,
-    maxTokens: 5000,
+    maxTokens: 8000,
     provider: policy.provider,
     model: policy.model,
     networkMode: policy.network_mode,
     deepThinking: policy.deep_thinking,
+    apiFamily: policy.api_family,
     onEvent: null,
   });
 

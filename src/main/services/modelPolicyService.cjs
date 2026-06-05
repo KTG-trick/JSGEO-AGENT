@@ -37,7 +37,7 @@ function getTaskPolicy(taskType, context = {}) {
     };
   }
 
-  if (task === 'source_discovery' || task === 'visibility_check') {
+  if (task === 'source_discovery') {
     return {
       task_type: task,
       provider: 'ark',
@@ -45,6 +45,18 @@ function getTaskPolicy(taskType, context = {}) {
       api_family: API_FAMILIES.DOUBAO_ASSISTANT,
       network_mode: NETWORK_MODES.DOUBAO_ASSISTANT_SEARCH,
       deep_thinking: true,
+      stream: true,
+    };
+  }
+
+  if (task === 'visibility_check') {
+    return {
+      task_type: task,
+      provider: 'ark',
+      model: arkModel(process.env.GEO_GENERATION_MODEL, process.env.DOUBAO_MODEL, process.env.ARK_MODEL),
+      api_family: API_FAMILIES.RESPONSES,
+      network_mode: NETWORK_MODES.WEB_SEARCH_PLUGIN,
+      deep_thinking: false,
       stream: true,
     };
   }
@@ -114,10 +126,10 @@ function getTaskPolicy(taskType, context = {}) {
     return {
       task_type: task,
       provider: 'ark',
-      model: arkModel(process.env.DOUBAO_ASSISTANT_MODEL, process.env.DOUBAO_RESPONSES_MODEL, process.env.DOUBAO_MODEL, process.env.ARK_MODEL),
-      api_family: API_FAMILIES.DOUBAO_ASSISTANT,
-      network_mode: NETWORK_MODES.DOUBAO_ASSISTANT_SEARCH,
-      deep_thinking: true,
+      model: arkModel(process.env.GEO_GENERATION_DOUBAO_MODEL, process.env.GEO_GENERATION_MODEL, process.env.DOUBAO_MODEL, process.env.ARK_MODEL),
+      api_family: API_FAMILIES.RESPONSES,
+      network_mode: NETWORK_MODES.WEB_SEARCH_PLUGIN,
+      deep_thinking: false,
       stream: true,
     };
   }

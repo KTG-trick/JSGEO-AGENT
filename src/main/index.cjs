@@ -175,6 +175,23 @@ function projectIdFromGeoProjectId(geoProjectId) {
   return String(geoProjectId || '').replace(/^geo-/, '');
 }
 
+function prepareKnowledgeDraftContext(payload = {}) {
+  let projectId = payload.project_id || payload.projectId || null;
+  const intent = payload.intent || 'create';
+  const shouldCreateProject = intent === 'create' && !projectId;
+  if (shouldCreateProject) {
+    const project = projectService.createProject({
+      name: fieldText(payload.profile || {}, 'company_name') || '待确认企业知识库',
+      description: '知识库草稿确认前自动创建的占位项目。',
+    }).project;
+    projectId = project.id;
+    payload.project_id = projectId;
+    payload.projectId = projectId;
+    payload.conversation_id = null;
+  }
+  return { projectId, shouldCreateProject };
+}
+
 function createShellWorkflowState(geoProjectId) {
   const projectId = String(geoProjectId || '').replace(/^geo-/, '');
   const snapshot = getKnowledgeSnapshot(projectId);
@@ -464,23 +481,34 @@ function registerHandlers() {
     knowledgeService.reparseKnowledgeAsset(assetId));
   ipcMain.handle('geo-agent:delete-knowledge-asset', async (_event, assetId) =>
     knowledgeService.deleteKnowledgeAsset(assetId));
-  ipcMain.handle('geo-agent:create-knowledge-draft', async (_event, draft) =>
-    knowledgeService.createKnowledgeDraft(draft));
+  ipcMain.handle('geo-agent:create-knowledge-draft', async (_event, draft = {}) => {
+    prepareKnowledgeDraftContext(draft);
+    return knowledgeService.createKnowledgeDraft(draft);
+  });
   ipcMain.handle('geo-agent:create-knowledge-draft-stream', async (event, request = {}) => {
     const requestId = request.requestId;
     const payload = request.payload || {};
     const channel = `geo-agent:create-knowledge-draft-stream:${requestId}`;
-    const projectId = payload.project_id || payload.projectId || null;
+    const context = prepareKnowledgeDraftContext(payload);
+    const projectId = context.projectId;
     let conversation = null;
     let draftMessage = null;
     try {
       if (true) {
         // 尝试复用最近的 geo_workflow 会话；没有则创建新的会话。
-        let effectiveConversationId = payload.conversation_id || null;
-        if (!effectiveConversationId) {
-          const latest = conversationService.findLatestConversation(null, 'geo_workflow');
+        let effectiveConversationId = context.shouldCreateProject ? null : payload.conversation_id || null;
+        if (!effectiveConversationId && projectId) {
+          const latest = conversationService.findLatestConversation(projectId, 'geo_workflow');
           if (latest) {
             effectiveConversationId = latest.id;
+          }
+        }
+        if (effectiveConversationId && projectId) {
+          const row = getDb()
+            .prepare('SELECT project_id FROM conversations WHERE id = ?')
+            .get(effectiveConversationId);
+          if (row && row.project_id !== projectId) {
+            effectiveConversationId = null;
           }
         }
         conversation = conversationService.ensureConversation({
@@ -489,6 +517,7 @@ function registerHandlers() {
           firstMessage: payload.message || '创建企业知识库',
           kind: 'geo_workflow',
         });
+        payload.conversation_id = conversation.id;
         conversationService.addMessage({
           conversationId: conversation.id,
           projectId,
@@ -503,10 +532,11 @@ function registerHandlers() {
           type: 'meta',
           task: 'knowledge_extraction',
           conversation_id: conversation.id,
+          project_id: projectId,
           can_proceed: false,
         });
       }
-      event.sender.send(channel, { type: 'meta', task: 'knowledge_extraction', can_proceed: false });
+      event.sender.send(channel, { type: 'meta', task: 'knowledge_extraction', project_id: projectId, can_proceed: false });
       const draft = await knowledgeService.createKnowledgeDraft(payload, (streamEvent) => {
         event.sender.send(channel, streamEvent);
       });
@@ -530,8 +560,8 @@ function registerHandlers() {
         });
         draft.conversation_id = conversation.id;
       }
-      event.sender.send(channel, { type: 'done', draft, conversation_id: conversation?.id, message: draftMessage, can_proceed: true });
-      return { type: 'done', draft, conversation_id: conversation?.id, message: draftMessage, can_proceed: true };
+      event.sender.send(channel, { type: 'done', draft, conversation_id: conversation?.id, project_id: projectId, message: draftMessage, can_proceed: true });
+      return { type: 'done', draft, conversation_id: conversation?.id, project_id: projectId, message: draftMessage, can_proceed: true };
     } catch (error) {
       const message = error.message || String(error);
       event.sender.send(channel, { type: 'error', error: message, can_proceed: false });
@@ -543,24 +573,33 @@ function registerHandlers() {
     const projectId = response.project_id;
     if (projectId) {
       try {
-        // 灏濊瘯澶嶇敤鏈€杩戠殑 geo_workflow 浼氳瘽锛堝寘鍚煡璇嗗簱鍒涘缓鍚庣殑鍚庣画闃舵锛?        // 濡傛灉娌℃湁锛屽垯鍒涘缓鏂扮殑 geo_workflow 浼氳瘽
-        let effectiveConversationId = payload.conversationId || null;
+        // 确认草稿后继续使用同一知识库的 geo_workflow 会话，避免历史被拆到别的项目。
+        let effectiveConversationId = payload.draft?.conversation_id || payload.conversationId || null;
         if (!effectiveConversationId) {
-          const latest = conversationService.findLatestConversation(null, 'geo_workflow');
+          const latest = conversationService.findLatestConversation(projectId, 'geo_workflow');
           if (latest) {
             effectiveConversationId = latest.id;
           }
         }
-        let conversation = effectiveConversationId
-          ? conversationService.bindConversationToProject(effectiveConversationId, projectId)
-          : null;
+        let conversation = null;
+        if (effectiveConversationId) {
+          try {
+            conversation = conversationService.bindConversationToProject(effectiveConversationId, projectId);
+          } catch {
+            effectiveConversationId = null;
+          }
+        }
+        if (!conversation && !effectiveConversationId) {
+          const latest = conversationService.findLatestConversation(projectId, 'geo_workflow');
+          effectiveConversationId = latest?.id || null;
+        }
         if (!conversation) {
           conversation = conversationService.ensureConversation({
-          projectId,
-          conversationId: effectiveConversationId,
-          title: `${response.profile.company_name || '浼佷笟'} GEO 浼樺寲`,
-          firstMessage: '寮€濮?GEO 浼樺寲娴佺▼',
-          kind: 'geo_workflow',
+            projectId,
+            conversationId: effectiveConversationId,
+            title: `${fieldText(response.profile || {}, 'company_name') || response.profile.company_name || '企业'} GEO 优化`,
+            firstMessage: '开始 GEO 优化流程',
+            kind: 'geo_workflow',
           });
         }
         payload.conversationId = conversation.id;
@@ -879,8 +918,16 @@ function registerHandlers() {
       return { type: 'error', error: errorMessage, conversation_id: conversation?.id };
     }
   });
-  ipcMain.handle('geo-agent:get-latest-geo-source-discovery', async (_event, geoProjectId, platform) =>
-    sourceDiscoveryService.getLatestSourceDiscovery(geoProjectId, platform));
+  ipcMain.handle('geo-agent:get-latest-geo-source-discovery', async (_event, geoProjectId, platform) => {
+    try {
+      return sourceDiscoveryService.getLatestSourceDiscovery(geoProjectId, platform);
+    } catch (error) {
+      if (String(error?.message || '').includes('暂无豆包助手联网信源发现结果')) {
+        return null;
+      }
+      throw error;
+    }
+  });
   ipcMain.handle('geo-agent:get-geo-source-discovery', async (_event, discoveryId) =>
     sourceDiscoveryService.getSourceDiscovery(discoveryId));
   ipcMain.handle('geo-agent:get-source-discoveries', async (_event, payload = {}) =>
@@ -892,8 +939,14 @@ function registerHandlers() {
     const project = createShellGeoProject(projectIdFromGeoProjectId(geoProjectId));
     const projectId = project.project_id;
     let effectiveConversationId = conversationId;
+    if (effectiveConversationId) {
+      const row = getDb().prepare('SELECT project_id FROM conversations WHERE id = ?').get(effectiveConversationId);
+      if (row && row.project_id !== projectId) {
+        effectiveConversationId = null;
+      }
+    }
     if (!effectiveConversationId) {
-      // 鍙鐢ㄥ悓涓€鐭ヨ瘑搴撶殑 geo_workflow 绫诲瀷浼氳瘽
+      // 只复用同一知识库下的 geo_workflow 会话。
       const latest = conversationService.findLatestConversation(projectId, 'geo_workflow');
       if (latest) {
         effectiveConversationId = latest.id;
@@ -1006,6 +1059,12 @@ function registerHandlers() {
     // 使用前端 requestId 构建 channel，确保事件能被前端正确接收。
     const channel = `geo-agent:run-geo-phase-two-report-stream:${requestId}`;
     const projectId = projectIdFromGeoProjectId(geoProjectId);
+    if (conversationId) {
+      const row = getDb().prepare('SELECT project_id FROM conversations WHERE id = ?').get(conversationId);
+      if (row && row.project_id !== projectId) {
+        conversationId = null;
+      }
+    }
 
     try {
       if (!conversationId) {
