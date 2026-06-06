@@ -623,29 +623,6 @@ function isConfirmableKnowledgeDraft(draft?: GeoAgentKnowledgeDraft | null) {
   return hasFacts || hasProfile;
 }
 
-function buildLongTailPreview(profile: GeoAgentEnterpriseProfileInput) {
-  const rawKeywords = profileFieldText(profile as Record<string, unknown>, 'target_keywords');
-  const keywords = rawKeywords
-    .split(/[\n,，、;；|]+/)
-    .map((item) => item.trim().replace(/\s+/g, ''))
-    .filter((item) => item && !/(怎么|如何|哪家|为什么|推荐|排行榜|口碑|靠谱|支持|选择)/.test(item))
-    .slice(0, 6);
-  const region = extractPreviewRegion(profileFieldText(profile as Record<string, unknown>, 'business_regions'));
-  const rows: string[] = [];
-  keywords.forEach((keyword) => {
-    rows.push(`${keyword}哪家好`, `${keyword}公司推荐`, `${keyword}怎么选`);
-    if (region && !keyword.includes(region)) {
-      rows.push(`${region}${keyword}哪家好`);
-    }
-  });
-  return Array.from(new Set(rows)).slice(0, 12);
-}
-
-function extractPreviewRegion(value: string) {
-  const text = value.replace(/\s+/g, '');
-  return text.match(/[\u4e00-\u9fa5]{2,8}(?:市|区|县|省|自治区)|(?:华东|华南|华中|华北|西南|西北|东北)地区?/)?.[0] ?? '';
-}
-
 function buildKnowledgeSavedSummary(profile: GeoAgentEnterpriseProfile, fileCount: number) {
   const savedFields = PROFILE_SUMMARY_FIELDS
     .filter(([field]) => hasProfileValue(profile[field]))
@@ -704,6 +681,7 @@ export function AgentStudio() {
   const stageInFlightRef = useRef<Set<string>>(new Set());
   const typewriterQueuesRef = useRef<Record<string, Promise<void>>>({});
   const skipNextConversationAutoRestoreRef = useRef(false);
+  const prevEnterpriseIdRef = useRef<string | null | undefined>(undefined);
   const pendingKnowledgeIngestRef = useRef<{
     intent?: 'create' | 'update';
     projectId?: string;
@@ -800,8 +778,24 @@ export function AgentStudio() {
     }
     if (skipNextConversationAutoRestoreRef.current) {
       skipNextConversationAutoRestoreRef.current = false;
+      prevEnterpriseIdRef.current = currentEnterprise?.id ?? null;
       return;
     }
+
+    const prev = prevEnterpriseIdRef.current;
+    const currentId = currentEnterprise?.id ?? null;
+    const isEnterpriseSwitch = !!prev && !!currentId && prev !== currentId;
+    prevEnterpriseIdRef.current = currentId;
+
+    if (isEnterpriseSwitch) {
+      openConversationRequestRef.current += 1;
+      setConversationId(null);
+      setMessages([]);
+      setInputValue('');
+      setSelectedSkill(null);
+      return;
+    }
+
     const storedConversationId = localStorage.getItem(currentConversationStorageKey);
     if (storedConversationId && window.geoAgent?.getConversation) {
       openConversation(storedConversationId, { silent: true, storageKey: currentConversationStorageKey }).catch(() => {
@@ -1906,9 +1900,11 @@ export function AgentStudio() {
       return;
     }
     if (response.conversation.project_id && currentEnterprise?.id && response.conversation.project_id !== currentEnterprise.id) {
-      skipNextConversationAutoRestoreRef.current = true;
-      await refreshEnterprises();
-      setEnterpriseId(response.conversation.project_id);
+      localStorage.removeItem(conversationStorageKey(currentEnterprise.id));
+      clearConversationStorageById(response.conversation.id);
+      setConversationId(null);
+      setMessages([]);
+      return;
     }
     const restoredMessages = response.messages
       .filter((message) => message.role === 'user' || message.role === 'assistant')
@@ -2535,7 +2531,6 @@ const KnowledgeDraftPreview: React.FC<{
 }> = ({ draft, visibleGroupCount }) => {
   const profile = draft.profile;
   const fileNames = draft.assets.map((asset) => asset.filename);
-  const previewLongTail = buildLongTailPreview(profile);
   const isFailed = !isConfirmableKnowledgeDraft(draft);
   const visibleGroups = DRAFT_PREVIEW_GROUPS
     .map((group) => ({
@@ -2586,21 +2581,6 @@ const KnowledgeDraftPreview: React.FC<{
           );
         })}
       </div>
-
-      {shouldShowSupplement && previewLongTail.length > 0 && (
-        <section className="mt-3 border-b border-outline-variant/15 pb-3">
-          <h4 className="mb-2 text-[12px] font-bold text-[#5d574f] dark:text-[#cfcfcf]">
-            预计生成长尾语义词
-          </h4>
-          <div className="flex flex-wrap gap-2">
-            {previewLongTail.slice(0, 8).map((keyword) => (
-              <span className="rounded-full bg-[#f0eee9] px-2.5 py-1 text-[11px] font-semibold text-[#6b6258] dark:bg-[#2d2d2d] dark:text-[#d4d4d4]" key={keyword}>
-                {keyword}
-              </span>
-            ))}
-          </div>
-        </section>
-      )}
 
       {shouldShowSupplement && (draft.missing_fields.length > 0 || fileNames.length > 0) && (
         <div className="mt-3 grid gap-2 text-[12px] text-[#6b6258] dark:text-[#cfcfcf]">

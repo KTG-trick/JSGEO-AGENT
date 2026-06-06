@@ -2,132 +2,92 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Overview
+> 产品定位、GEO 七阶段流程、模型与联网边界、协作心智模型见 [CODEX.md](./CODEX.md)，本文件不重复其内容，只补充工程化操作所需信息。
 
-GEO-Agent Studio — an Electron desktop application for Generative Engine Optimization (GEO) workflows. It helps enterprises build knowledge bases, discover AI-relevant sources, and generate content optimized for AI platforms (Doubao, DeepSeek).
-
-The UI is in Chinese (zh-CN). All user-facing strings and comments in business logic should remain in Chinese.
-
-## Architecture
-
-### Electron Process Split
-
-- **`src/renderer/`** — React 19 + TypeScript frontend. Vite build target. Uses TailwindCSS v4, shadcn/ui, Radix UI primitives, motion/react for animations.
-- **`src/main/`** — Electron main process. **CommonJS (`.cjs`) only.** Node.js runtime. No bundler.
-- **`src/shared/`** — TypeScript types shared between both processes (imported by renderer, manually synced in main).
-
-### IPC Bridge
-
-All main/renderer communication goes through `window.geoAgent` (exposed in `preload.cjs`).
-
-- Non-streaming: `ipcRenderer.invoke(channel, ...args)` → `ipcMain.handle(channel, handler)`
-- **Streaming**: Each call gets a `requestId`. The main process sends events to a per-request channel (e.g. `geo-agent:chat-stream:${requestId}`). Preload's `invokeStream()` wraps this into a Promise that resolves on `type: 'done'` and rejects on `type: 'error'`.
-
-### Services (Main Process)
-
-All service modules are in `src/main/services/` and use `.cjs` extension:
-
-| Service | Responsibility |
-|---------|---------------|
-| `databaseService.cjs` | SQLite (`better-sqlite3`) init, schema, migrations. DB lives at `<userData>/geo-agent-studio.sqlite3`. Uses WAL mode, FTS5 for full-text search on `knowledge_chunks_fts`. |
-| `projectService.cjs` | CRUD for projects and knowledge profiles. |
-| `knowledgeService.cjs` | Knowledge entries, chunks, indexing (FTS), drafts, enterprise profiles. |
-| `conversationService.cjs` | Chat conversations and messages persistence. |
-| `sourceDiscoveryService.cjs` | GEO Phase 3 — source discovery reports. |
-| `modelPolicyService.cjs` | Task-based model routing (extraction, generation, reflection). |
-| `llmGateway.cjs` | LLM provider abstraction (OpenAI, DeepSeek, Doubao/Ark). |
-| `knowledgeExtractionService.cjs` | Document parsing + LLM-based fact extraction for knowledge drafts. |
-
-### Document Parser
-
-`src/main/parsers/documentParser.cjs` — parses uploaded documents (currently mammoth for `.docx`) into text chunks for knowledge extraction.
-
-### LLM Providers (via env)
-
-Configured in `.env` (copied from `.env.example`):
-
-- **OpenAI** — primary for knowledge extraction (`GEO_EXTRACTION_PROVIDER=openai`). Supports both chat completions and Responses API (`GEO_EXTRACTION_API_FAMILY`).
-- **DeepSeek** — reasoning tasks (`DEEPSEEK_DEEP_THINKING=true`).
-- **Doubao / Volcengine Ark** — generation + embedding (`ARK_EMBEDDING_MODEL` for sqlite-vec vector retrieval).
-
-Model selection is task-driven: extraction always uses OpenAI; generation/reflection use configured task models.
-
-### Database Schema (SQLite)
-
-Key tables: `projects`, `enterprise_profiles`, `knowledge_drafts`, `knowledge_entries`, `knowledge_chunks`, `knowledge_chunks_fts` (FTS5 virtual table), `conversations`, `messages`, `workflow_events`, `geo_question_sets`, `geo_source_discoveries`, `geo_article_drafts`, `ai_visibility_checks`, `evolution_rules`.
-
-Foreign keys cascade on delete. Schema is created in `databaseService.cjs`; migrations are done via `ALTER TABLE` in `migrateSchema()`.
-
-### GEO Workflow Phases
-
-1. **Knowledge Base** — upload/paste enterprise materials → LLM extracts structured profile → confirmed → indexed (FTS + optional embedding)
-2. **AI Question Pool** — per-platform (Doubao/DeepSeek) question generation
-3. **Source Discovery** — find high-weight sources cited by AI platforms
-4. **Support Content** — generate consulting, review, and ranking article drafts
-
-Many Phase 2–4 handlers are currently stubbed (`notImplemented`) and return placeholder responses.
-
-## Development Commands
+## 开发命令
 
 ```bash
-# Install dependencies
-npm install
-
-# Start development (Vite dev server + Electron)
-npm run dev
-
-# Build renderer for production
-npm run build
-
-# Type check (no test runner configured)
-npm run typecheck       # alias: npm run lint
-
-# Clean build artifacts
-npm run clean
-
-# Build + package with electron-builder
-npm run dist
+npm run dev         # 启动 Vite (3000 端口) 并拉起 Electron；启动前自动检测端口占用
+npm run typecheck   # tsc --noEmit；等同于 npm run lint
+npm test            # node --test tests/*.test.cjs（Node 内置 test runner）
+npm run build       # 仅构建渲染端到 dist/
+npm run dist        # build + electron-builder 打包桌面应用
+npm run clean       # 清理 dist/
 ```
 
-## Important Conventions
+- 跑单个测试文件：`node --test tests/sourceDiscoveryService.test.cjs`
+- 端口冲突由 [scripts/check-dev-port.cjs](scripts/check-dev-port.cjs) 检测，默认 3000，可用 `GEO_AGENT_DEV_PORT` 覆盖
+- 主进程改动**不能依赖 Vite HMR**，需要重启 `npm run dev`
+- 文档改动通常无需跑构建；改主进程/IPC/类型至少跑 `typecheck`；改服务逻辑跑 `npm test`
 
-### Dual Module Systems
+## 架构骨架
 
-- **Renderer**: ESM (`import`/`export`), `.ts`/`.tsx`. Path alias `@/` → `src/renderer/`.
-- **Main**: CommonJS (`require`/`module.exports`), `.cjs` **only**. No path aliases. Use relative paths.
-- When adding a type in `src/shared/`, manually update the corresponding CJS code in main — there is no shared import between processes.
+Electron 桌面应用，主进程 + 渲染进程，模块系统严格分裂：
 
-### Env File
+| 目录 | 模块系统 | 扩展名 | 说明 |
+|---|---|---|---|
+| `src/main/` | CommonJS | `.cjs` 仅 | Node 运行时，无打包器，relative require 不使用 alias |
+| `src/renderer/` | ESM | `.ts`/`.tsx` | Vite + React 19 + Tailwind v4，路径 alias `@/` → `src/renderer/` |
+| `src/shared/` | 双用 | `.ts` + `.cjs` | 类型在 `.ts`，主进程能用的 schema 写成 `.cjs`（见 `profileSchema.cjs`） |
 
-The main process loads `.env` from the project root at startup (`loadEnvFile()` in `index.cjs`). Copy `.env.example` to `.env` and fill in API keys before running. `.env` is **not** shipped in the build.
+入口：
+- 主进程 [src/main/index.cjs](src/main/index.cjs) — 启动窗口、注册全部 `ipcMain.handle`、加载 `.env`
+- Preload [src/main/preload.cjs](src/main/preload.cjs) — 通过 `contextBridge.exposeInMainWorld('geoAgent', …)` 把能力暴露给渲染端
+- 渲染入口 [src/renderer/main.tsx](src/renderer/main.tsx) → [src/renderer/App.tsx](src/renderer/App.tsx) — 顶层视图由 `currentView` 切换，包在 `EnterpriseProvider` 内
 
-### HMR Behavior
+### IPC 调用约定
 
-Vite HMR is controlled by `DISABLE_HMR` env var. When set (e.g. in AI Studio), file watching is disabled to prevent flicker during agent edits. Do not modify this behavior in `vite.config.ts`.
+渲染端调用一律走 `window.geoAgent.<method>`，类型定义在 [src/renderer/global.d.ts](src/renderer/global.d.ts) 的 `Window.geoAgent` 接口里。
 
-### UI Components
+**非流式**：`ipcRenderer.invoke('geo-agent:<action>', payload)` ↔ `ipcMain.handle('geo-agent:<action>', handler)`，channel 命名一律 `geo-agent:` 前缀。
 
-`src/renderer/components/ui/` contains shadcn/ui components (built on Radix UI). New UI primitives go here. `src/renderer/components/ai-elements/` contains custom AI chat UI components (message bubbles, reasoning chains, source citations, etc.).
+**流式**：每次调用生成 `requestId`，事件 channel 为 `geo-agent:<action>-stream:${requestId}`。preload 中的 `invokeStream()` 包装好了 Promise，在收到 `type: 'done'` 时 resolve、`type: 'error'` 时 reject。事件 type 常用：`meta` | `status` | `delta` | `reasoning_delta` | `result` | `done` | `error`。
 
-### State & Context
+新增流式 IPC 时需要同步四处：① 主进程 `index.cjs` 注册 handler；② `preload.cjs` 增加方法（复用 `invokeStream`）；③ `global.d.ts` 加类型；④ 调用方（视图或服务）使用。
 
-`src/renderer/context/EnterpriseContext.tsx` provides the global enterprise/project context. Views switch via `currentView` state in `App.tsx` with animated transitions (`motion/react`).
+### 主进程服务分层
 
-### Streaming API Pattern
+业务能力按服务拆分在 [src/main/services/](src/main/services/)（全部 `.cjs`）。Index.cjs 只编排 IPC，业务逻辑都在服务里：
 
-When adding a new streaming IPC handler in main:
+- 数据层：`databaseService.cjs`（better-sqlite3，WAL + FK，FTS5 表 `knowledge_chunks_fts`，DB 文件 `<userData>/geo-agent-studio.sqlite3`）
+- 知识库：`knowledgeService` / `knowledgeExtractionService` / `embeddingService`（sqlite-vec 向量）/ `profileFieldService`
+- 对话/项目：`conversationService` / `projectService` / `skillService`
+- GEO 阶段：`questionPoolService`（阶段二）/ `sourceDiscoveryService`（阶段三）/ `articleDraftService`（阶段四）/ `articlePublishService` + `ossPreviewService` + `chaojimeijieService` + `publishRecommendationService`（阶段五）/ `visibilityCheckService`（阶段六）/ `reflectionService`（阶段七）
+- 模型与网关：`modelPolicyService.cjs`（任务驱动的 provider / model / network_mode 选择）+ `llmGateway.cjs`（OpenAI / DeepSeek / Doubao Ark 抽象）
 
-1. Register handler in `index.cjs` as `geo-agent:<action>-stream`
-2. Accept `{ requestId, payload }` as arguments
-3. Use channel name: `geo-agent:<action>-stream:${requestId}`
-4. Send events with `{ type: 'meta' | 'status' | 'delta' | 'done' | 'error', ... }`
-5. Add corresponding method in `preload.cjs` using `invokeStream()`
-6. Add type in `global.d.ts` under `Window.geoAgent`
+**模型路由的关键不变量**：所有联网决策都集中在 `modelPolicyService.getTaskPolicy(taskType, ctx)` 里，业务服务不要硬编码联网模式。只有 `task_type === 'source_discovery'` 才使用 `DOUBAO_ASSISTANT_SEARCH`；其他任务联网走 `WEB_SEARCH_PLUGIN`。详见 [CODEX.md 的"模型与联网边界"](./CODEX.md)。
 
-## File Extensions to Respect
+### 渲染端视图
 
-| Location | Extension |
-|----------|-----------|
-| `src/main/` | `.cjs` only |
-| `src/renderer/` | `.ts`, `.tsx` |
-| `src/shared/` | `.ts` |
+[src/renderer/views/](src/renderer/views/)：`Dashboard` / `AgentStudio`（智能助手）/ `KnowledgeBase` / `Drafts`（稿件管理）/ `Projects` / `AutoLearning` / `WebBuilder`。视图通过 `App.tsx` 的 `currentView` 切换，并监听自定义事件 `geo-agent-open-view` 跨视图跳转。
+
+UI 基础组件分两层：
+- [src/renderer/components/ui/](src/renderer/components/ui/) — shadcn / Radix 原语
+- [src/renderer/components/ai-elements/](src/renderer/components/ai-elements/) — 自定义 AI 对话组件（message / reasoning / sources / chain-of-thought 等）
+
+全局企业上下文在 [src/renderer/context/EnterpriseContext.tsx](src/renderer/context/EnterpriseContext.tsx)。
+
+## 环境与配置
+
+- `.env` 由主进程启动时通过 `loadEnvFile()` 读取（[src/main/index.cjs](src/main/index.cjs)），仅读取根目录，**不会**被打进发布包
+- 新建环境时把 [.env.example](.env.example) 复制为 `.env` 并填入 OpenAI / DeepSeek / Ark / 阿里云 OSS / 超级媒介 的密钥
+- 知识抽取 (`GEO_EXTRACTION_*`) 当前固定走 OpenAI Responses API，确认 `GEO_EXTRACTION_API_FAMILY=responses`
+- 嵌入向量 (`ARK_EMBEDDING_*`) 用于 sqlite-vec 本地检索，无 API key 时退化为仅 FTS
+
+## 工程约束（高优先级）
+
+1. **主进程禁止 ESM / `.ts`**：一旦看到 `import …` 出现在 `src/main/` 立刻改成 `require`。新增共享类型时，TS 类型放 `src/shared/*.ts`，主进程要用的实际值/schema 用 `.cjs` 重新写一份（参考 `profileSchema.cjs`）。
+2. **不要回退用户改动**：工作树可能不干净；改动前先 `git status`，遇到非自己引入的修改先问清楚。CODEX.md 也强调这一点。
+3. **联网策略修改必须验证**：改 `modelPolicyService` 或 `llmGateway` 后，确认非信源发现任务没被切到豆包助手联网（高成本）。
+4. **数据库 schema 迁移**：在 `databaseService.cjs` 的 `createSchema()`（建表）和 `migrateSchema()`（用 `ALTER TABLE`）双写；不要直接改建表语句而忘了迁移。
+5. **UI 文案保持中文**：用户可见字符串使用中文，不要因为代码风格切回英文。
+
+## 协作语言
+
+按用户的全局规范，**默认使用中文与用户交流**；代码注释和 commit message 也以中文为主，路径/标识符保留英文。
+
+## 既有文档
+
+- [CODEX.md](./CODEX.md) — 产品定位、七阶段流程、模型边界、协作心智模型（最权威）
+- [doc/GEO-Agent-Studio-从零开发文档.md](doc/) — 历史开发文档
+- [skills/](skills/) — Claude Code 技能脚本（`knowledge-base-ingest.md` / `geo-question-set.md` / `geo-source-discovery.md` / `geo-support-content.md`）
