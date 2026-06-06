@@ -171,32 +171,6 @@ function mergeFilledProfiles(...profiles) {
   return output;
 }
 
-function mergeMissingProfiles(...profiles) {
-  const output = {};
-  profiles.forEach((profile) => {
-    if (!profile) return;
-    PROFILE_FIELD_KEYS.forEach((field) => {
-      if (!fieldText(output, field) && fieldText(profile, field)) {
-        output[field] = profile[field];
-      }
-    });
-    ['id', 'project_id', 'generated_long_tail_keywords'].forEach((field) => {
-      if (!output[field] && profile[field]) {
-        output[field] = profile[field];
-      }
-    });
-  });
-  return output;
-}
-
-function clearProjectAssetKnowledge(projectId) {
-  if (!projectId) return;
-  const rows = getDb().prepare('SELECT id FROM knowledge_assets WHERE project_id = ?').all(projectId);
-  rows.forEach((row) => {
-    deleteKnowledgeAsset(row.id);
-  });
-}
-
 function buildProfileContent(profile = {}) {
   return PROFILE_FIELDS
     .filter(([field]) => fieldText(profile, field))
@@ -911,7 +885,6 @@ async function createKnowledgeDraft(payload = {}) {
   return {
     id: draftId,
     intent: payload.intent || 'create',
-    merge_mode: payload.mergeMode === 'replace' || payload.merge_mode === 'replace' ? 'replace' : 'supplement',
     project_id: projectExists(payload.project_id) ? payload.project_id : null,
     conversation_id: payload.conversation_id || null,
     assistant_message_id: null,
@@ -950,25 +923,15 @@ async function confirmKnowledgeDraft(payload = {}) {
   if (!draftId) throw new Error('draftId is required.');
 
   const draft = getDraft(draftId);
-  const payloadDraft = payload.draft && typeof payload.draft === 'object' ? payload.draft : {};
-  const mergeMode = payload.mergeMode === 'replace' || payload.merge_mode === 'replace' || payloadDraft.merge_mode === 'replace'
-    ? 'replace'
-    : 'supplement';
   const draftProfile = normalizeProfile(parseJson(draft.profile_json, {}));
   const existingProfile = projectExists(draft.project_id)
     ? getKnowledgeProfile(draft.project_id).profile
     : null;
   const payloadProfile = normalizeProfile(payload.profile || {});
-  const profile = mergeMode === 'replace'
-    ? normalizeProfile(mergeFilledProfiles(draftProfile, payloadProfile, { project_id: draft.project_id || payloadProfile.project_id }))
-    : normalizeProfile(mergeMissingProfiles(existingProfile, draftProfile, payloadProfile));
+  const profile = normalizeProfile(mergeFilledProfiles(existingProfile, draftProfile, payloadProfile));
   const response = saveProfile({ ...profile, project_id: projectExists(draft.project_id) ? draft.project_id : profile.project_id });
   const projectId = response.profile.project_id || response.profile.id;
   const draftAssets = draftAssetsForStorage(parseJson(draft.assets_json, []));
-
-  if (mergeMode === 'replace') {
-    clearProjectAssetKnowledge(projectId);
-  }
 
   getDb().prepare(`
     UPDATE knowledge_drafts
@@ -1459,7 +1422,6 @@ function createFailedDraftResponse({ draftId, payload, assets, documents, messag
   return {
     id: draftId,
     intent: payload.intent || 'create',
-    merge_mode: payload.mergeMode === 'replace' || payload.merge_mode === 'replace' ? 'replace' : 'supplement',
     project_id: projectExists(payload.project_id) ? payload.project_id : null,
     conversation_id: payload.conversation_id || null,
     assistant_message_id: null,
@@ -1606,7 +1568,6 @@ async function createKnowledgeDraftStrict(payload = {}, onEvent = null) {
   const draft = {
     id: draftId,
     intent: payload.intent || 'create',
-    merge_mode: payload.mergeMode === 'replace' || payload.merge_mode === 'replace' ? 'replace' : 'supplement',
     project_id: projectExists(payload.project_id) ? payload.project_id : null,
     conversation_id: payload.conversation_id || null,
     assistant_message_id: null,

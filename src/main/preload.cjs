@@ -154,7 +154,7 @@ contextBridge.exposeInMainWorld('geoAgent', {
   deleteKnowledgeAsset: (assetId) => ipcRenderer.invoke('geo-agent:delete-knowledge-asset', assetId),
   createKnowledgeDraft: (draft) => ipcRenderer.invoke('geo-agent:create-knowledge-draft', draft),
   createKnowledgeDraftStream: (draft, onEvent) => invokeStream('geo-agent:create-knowledge-draft-stream', draft, onEvent),
-  confirmKnowledgeDraft: (draftId, profile, conversationId = null, draft = null, mergeMode = 'supplement') => ipcRenderer.invoke('geo-agent:confirm-knowledge-draft', { draftId, profile, conversationId, draft, mergeMode }),
+  confirmKnowledgeDraft: (draftId, profile, conversationId = null, draft = null) => ipcRenderer.invoke('geo-agent:confirm-knowledge-draft', { draftId, profile, conversationId, draft }),
   rejectKnowledgeDraft: (draftId) => ipcRenderer.invoke('geo-agent:reject-knowledge-draft', draftId),
   reindexKnowledge: (projectId) => ipcRenderer.invoke('geo-agent:reindex-knowledge', projectId),
   getKnowledgeIndexStatus: (projectId) => ipcRenderer.invoke('geo-agent:get-knowledge-index-status', projectId),

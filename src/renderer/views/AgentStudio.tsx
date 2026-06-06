@@ -212,14 +212,7 @@ type ProfileFieldDefinition = {
 
 const profileFieldDefinitions = PROFILE_FIELD_DEFINITIONS as ProfileFieldDefinition[];
 const PROFILE_SUMMARY_FIELDS = profileFieldDefinitions.map((field) => [field.key, field.label] as [keyof GeoAgentEnterpriseProfile, string]);
-const profileFieldByLabel = new Map(profileFieldDefinitions.map((field) => [field.label, field]));
 const PLACEHOLDER_PROFILE_VALUES = new Set(['', '待补充', '未填', '未填写', DRAFT_PROFILE_NAME, '待确认企业名称', '待确认企业知识库', '企业知识库草稿', '待录入企业']);
-
-type KnowledgeSupplementState = {
-  messageId: string;
-  draft: GeoAgentKnowledgeDraft;
-  values: Record<string, string>;
-};
 
 function phaseTwoPromptKey(projectId: string, conversationId: string | null, platform: 'doubao' | 'deepseek') {
   return `${projectId}:${platform}`;
@@ -597,31 +590,6 @@ function profileValueText(value: unknown): string {
   return profileFieldText({ value }, 'value');
 }
 
-function draftMissingFieldDefinitions(draft: GeoAgentKnowledgeDraft) {
-  const definitions = draft.missing_fields
-    .map((field) => {
-      const keyMatch = profileFieldDefinitions.find((definition) => definition.key === field);
-      return keyMatch ?? profileFieldByLabel.get(field);
-    })
-    .filter((field): field is ProfileFieldDefinition => Boolean(field));
-  const unique = new Map(definitions.map((field) => [field.key, field]));
-  return Array.from(unique.values());
-}
-
-function mergeDraftProfileWithSupplement(
-  draft: GeoAgentKnowledgeDraft,
-  values: Record<string, string>
-): GeoAgentEnterpriseProfileInput {
-  const nextProfile: GeoAgentEnterpriseProfileInput = { ...draft.profile };
-  const nextRecord = nextProfile as Record<string, unknown>;
-  profileFieldDefinitions.forEach((field) => {
-    const text = (values[String(field.key)] || '').trim();
-    if (!text) return;
-    nextRecord[String(field.key)] = toProfileEvidenceField(text);
-  });
-  return nextProfile;
-}
-
 function upsertReasoningStep(
   messages: ChatMessage[],
   id: string,
@@ -730,7 +698,6 @@ export function AgentStudio() {
   const [configStatus, setConfigStatus] = useState<ConfigStatus | null>(null);
   const [geoProject, setGeoProject] = useState<GeoAgentGeoProject | null>(null);
   const [workflowState, setWorkflowState] = useState<GeoAgentWorkflowState | null>(null);
-  const [knowledgeSupplement, setKnowledgeSupplement] = useState<KnowledgeSupplementState | null>(null);
   const inputShellRef = useRef<HTMLDivElement | null>(null);
   const openConversationRequestRef = useRef(0);
   const phaseTwoPromptInFlightRef = useRef<Set<string>>(new Set());
@@ -1836,8 +1803,7 @@ export function AgentStudio() {
       reasoning: '用户已确认知识库草稿，正在正式写入本地知识库并建立索引。',
     }));
     try {
-      const mergeMode = draft.merge_mode === 'replace' ? 'replace' : 'supplement';
-      const response = await window.geoAgent.confirmKnowledgeDraft(draft.id, draft.profile, draft.conversation_id || conversationId, draft, mergeMode);
+      const response = await window.geoAgent.confirmKnowledgeDraft(draft.id, draft.profile, draft.conversation_id || conversationId, draft);
       if (response.conversation_id) {
         migrateGlobalConversationStorage(response.project_id, response.conversation_id);
         skipNextConversationAutoRestoreRef.current = true;
@@ -1897,37 +1863,14 @@ export function AgentStudio() {
     }
   };
 
-  const continueKnowledgeDraftInput = (messageId: string, draft?: GeoAgentKnowledgeDraft | null) => {
-    if (!draft) return;
-    const fields = draftMissingFieldDefinitions(draft);
-    setKnowledgeSupplement({
-      messageId,
-      draft,
-      values: Object.fromEntries(fields.map((field) => [String(field.key), ''])),
-    });
-  };
-
-  const updateKnowledgeSupplementValue = (field: string, value: string) => {
-    setKnowledgeSupplement((current) => current
-      ? { ...current, values: { ...current.values, [field]: value } }
-      : current);
-  };
-
-  const confirmKnowledgeSupplement = () => {
-    if (!knowledgeSupplement) return;
-    const supplementedDraft: GeoAgentKnowledgeDraft = {
-      ...knowledgeSupplement.draft,
-      profile: mergeDraftProfileWithSupplement(knowledgeSupplement.draft, knowledgeSupplement.values),
-      missing_fields: draftMissingFieldDefinitions(knowledgeSupplement.draft)
-        .filter((field) => !knowledgeSupplement.values[String(field.key)]?.trim())
-        .map((field) => field.label),
-    };
-    setMessages((current) => updateMessage(current, knowledgeSupplement.messageId, {
-      knowledgeDraft: supplementedDraft,
-      content: '已补充当前知识库草稿信息，正在写入本地知识库并继续 GEO 流程。',
+  const continueKnowledgeDraftInput = (messageId: string) => {
+    setMessages((current) => updateMessage(current, messageId, {
+      content: '可以继续上传资料或补充说明，我会基于新增内容重新生成知识库草稿。当前草稿先保留，避免流程中断。',
+      confirmationState: 'approval-requested',
+      confirmationApproved: undefined,
+      actionBusy: false,
+      status: 'complete',
     }));
-    setKnowledgeSupplement(null);
-    confirmKnowledgeDraft(knowledgeSupplement.messageId, supplementedDraft);
   };
 
   const selectSkill = (skill: GeoAgentSkill) => {
@@ -2262,15 +2205,6 @@ export function AgentStudio() {
         </div>
       </div>
     </div>
-    {knowledgeSupplement && (
-      <KnowledgeSupplementDialog
-        draft={knowledgeSupplement.draft}
-        onCancel={() => setKnowledgeSupplement(null)}
-        onChange={updateKnowledgeSupplementValue}
-        onConfirm={confirmKnowledgeSupplement}
-        values={knowledgeSupplement.values}
-      />
-    )}
     </TooltipProvider>
   );
 }
@@ -2339,7 +2273,7 @@ const AttachmentAwareSubmit: React.FC<{
 
 const ChatBubble: React.FC<{
   message: ChatMessage;
-  onContinueKnowledgeDraft: (messageId: string, draft?: GeoAgentKnowledgeDraft | null) => void;
+  onContinueKnowledgeDraft: (messageId: string) => void;
   onConfirmDraft: (messageId: string, draft: GeoAgentKnowledgeDraft) => void;
   onConfirmPhaseTwo: (messageId: string, project: GeoAgentGeoProject, platform?: 'doubao' | 'deepseek') => void;
   onConfirmSupportArticles: (messageId: string, discovery: GeoAgentGeoSourceDiscovery) => void;
@@ -2469,7 +2403,7 @@ const ChatBubble: React.FC<{
         <AssistantConfirmationBar
           approved={message.confirmationApproved}
           id={message.knowledgeDraft.id}
-          onCancel={() => onContinueKnowledgeDraft(message.id, message.knowledgeDraft)}
+          onCancel={() => onContinueKnowledgeDraft(message.id)}
           onConfirm={() => onConfirmDraft(message.id, message.knowledgeDraft!)}
           state={message.confirmationState ?? 'approval-requested'}
           title="确认后将建立企业知识库，并生成本地知识条目与向量索引。"
@@ -2482,12 +2416,12 @@ const ChatBubble: React.FC<{
         <AssistantConfirmationBar
           approved={message.confirmationApproved}
           id={message.phaseTwoPrompt.id}
-          onCancel={() => undefined}
+          onCancel={() => onConfirmPhaseTwo(message.id, message.phaseTwoPrompt!, message.phaseTwoPlatform)}
           onConfirm={() => onConfirmPhaseTwo(message.id, message.phaseTwoPrompt!, message.phaseTwoPlatform)}
           state={message.confirmationState ?? 'approval-requested'}
           title={`进入阶段二，生成${platformLabelFor(message.phaseTwoPlatform ?? 'doubao')}排行榜问题池。`}
           confirmLabel={`生成${platformLabelFor(message.phaseTwoPlatform ?? 'doubao')}排行榜问题池`}
-          cancelLabel=""
+          cancelLabel="重新生成问题池"
           busy={message.actionBusy}
         />
       )}
@@ -2495,12 +2429,12 @@ const ChatBubble: React.FC<{
         <AssistantConfirmationBar
           approved={message.confirmationApproved}
           id={message.supportArticlesPrompt.id}
-          onCancel={() => undefined}
+          onCancel={() => onConfirmSupportArticles(message.id, message.supportArticlesPrompt!)}
           onConfirm={() => onConfirmSupportArticles(message.id, message.supportArticlesPrompt!)}
           state={message.confirmationState ?? 'approval-requested'}
           title={`生成${platformLabelFor(message.supportArticlesPrompt.platform === 'deepseek' ? 'deepseek' : 'doubao')}阶段四内容资产，会生成首轮支撑文章和排行榜文章草稿。`}
           confirmLabel="生成内容资产"
-          cancelLabel=""
+          cancelLabel="重新生成内容资产"
           busy={message.actionBusy}
         />
       )}
@@ -2688,73 +2622,6 @@ const KnowledgeDraftPreview: React.FC<{
           )}
         </div>
       )}
-    </div>
-  );
-};
-
-const KnowledgeSupplementDialog: React.FC<{
-  draft: GeoAgentKnowledgeDraft;
-  onCancel: () => void;
-  onChange: (field: string, value: string) => void;
-  onConfirm: () => void;
-  values: Record<string, string>;
-}> = ({ draft, onCancel, onChange, onConfirm, values }) => {
-  const fields = draftMissingFieldDefinitions(draft);
-
-  return (
-    <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/45 px-4 py-6" role="presentation">
-      <div className="flex max-h-[calc(100vh-3rem)] w-full max-w-2xl flex-col rounded-2xl bg-white p-5 shadow-2xl dark:bg-[#1f1f1f]">
-        <div className="flex items-start justify-between gap-4 border-b border-outline-variant/20 pb-4">
-          <div className="min-w-0">
-            <h2 className="font-heading text-[20px] font-bold text-primary">补充知识库资料</h2>
-            <p className="mt-1 text-[13px] leading-relaxed text-on-surface-variant">
-              可只补充你现在掌握的字段。确认后会建立知识库并继续进入阶段二。
-            </p>
-          </div>
-          <button
-            className="grid h-8 w-8 shrink-0 place-items-center rounded-full text-on-surface-variant transition-colors hover:bg-surface-container hover:text-primary"
-            onClick={onCancel}
-            type="button"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-
-        <div className="mt-4 min-h-0 space-y-3 overflow-y-auto pr-1">
-          {fields.length > 0 ? fields.map((field) => (
-            <label className="block" key={String(field.key)}>
-              <span className="mb-1.5 block text-[12px] font-bold text-primary">{field.label}</span>
-              <textarea
-                className="min-h-[86px] w-full resize-y rounded-xl border border-outline-variant/40 bg-[#f7f7f5] px-3 py-2 text-[13px] leading-relaxed text-primary outline-none transition-colors placeholder:text-on-surface-variant/45 focus:border-secondary dark:bg-[#111]"
-                onChange={(event) => onChange(String(field.key), event.target.value)}
-                placeholder={`补充${field.label}，可留空`}
-                value={values[String(field.key)] || ''}
-              />
-            </label>
-          )) : (
-            <div className="rounded-xl bg-[#f7f7f5] p-4 text-[13px] leading-relaxed text-on-surface-variant dark:bg-[#111]">
-              当前草稿没有明确缺失字段。你可以直接确认建立知识库，后续再到知识库详情页编辑。
-            </div>
-          )}
-        </div>
-
-        <div className="mt-5 flex flex-wrap justify-end gap-3 border-t border-outline-variant/20 pt-4">
-          <button
-            className="rounded-xl border border-outline-variant/50 bg-white px-4 py-2.5 text-[13px] font-bold text-primary transition-colors hover:bg-surface-container dark:bg-[#111]"
-            onClick={onCancel}
-            type="button"
-          >
-            返回草稿
-          </button>
-          <button
-            className="rounded-xl bg-secondary px-5 py-2.5 text-[13px] font-bold text-on-secondary transition-opacity hover:opacity-90"
-            onClick={onConfirm}
-            type="button"
-          >
-            确认补全并继续
-          </button>
-        </div>
-      </div>
     </div>
   );
 };

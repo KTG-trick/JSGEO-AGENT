@@ -25,7 +25,6 @@ import {
 } from '../lib/profileSchema';
 
 type KnowledgeMode = 'list' | 'detail' | 'builder';
-type KnowledgeUpdateMode = 'supplement' | 'replace';
 
 const DELETE_CONFIRMATION_TEXT = '确认删除此知识库';
 
@@ -856,7 +855,9 @@ function KnowledgeDetail({
   const [detailEntry, setDetailEntry] = useState<GeoAgentKnowledgeEntry | null>(null);
   const [isMarkdownOpen, setIsMarkdownOpen] = useState(false);
   const [isEntriesOpen, setIsEntriesOpen] = useState(false);
-  const [knowledgeUpdateMode, setKnowledgeUpdateMode] = useState<KnowledgeUpdateMode>('supplement');
+  const [retrievalQuery, setRetrievalQuery] = useState('');
+  const [retrievalResults, setRetrievalResults] = useState<GeoAgentKnowledgeEntry[]>([]);
+  const [isTestingRetrieval, setIsTestingRetrieval] = useState(false);
   const uploadInputId = `knowledge-upload-${projectId || 'current'}`;
 
   const handleDocumentUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -877,14 +878,9 @@ function KnowledgeDetail({
         content_type: file.type || null,
         content_base64: await fileToBase64(file),
       })));
-      const isReplaceMode = knowledgeUpdateMode === 'replace';
       const draftPayload = {
-        message: isReplaceMode
-          ? `请根据上传附件重新录入「${enterpriseName}」企业知识库，本次资料作为新的事实来源。`
-          : `请根据上传附件补充「${enterpriseName}」企业知识库缺失资料，优先补齐空字段。`,
+        message: `请根据上传附件生成「${enterpriseName}」企业知识库更新草稿。`,
         intent: 'update',
-        mergeMode: knowledgeUpdateMode,
-        merge_mode: knowledgeUpdateMode,
         project_id: projectId,
         skill_id: 'knowledge-base-ingest',
         assets,
@@ -900,9 +896,7 @@ function KnowledgeDetail({
         const draft = await window.geoAgent.createKnowledgeDraft(draftPayload);
         conversationId = draft.conversation_id || null;
       }
-      setUploadError(isReplaceMode
-        ? '已生成知识库更新草稿，请在智能助手中确认后替换当前知识库资料。'
-        : '已生成知识库补充草稿，请在智能助手中确认后补齐当前知识库。');
+      setUploadError('已生成知识库更新草稿，请在智能助手中确认后写入当前知识库。');
       window.dispatchEvent(new CustomEvent('geo-agent-open-view', { detail: { view: 'agent' } }));
       window.setTimeout(() => {
         if (conversationId) {
@@ -913,9 +907,7 @@ function KnowledgeDetail({
           detail: {
             intent: 'update',
             projectId,
-            message: isReplaceMode
-              ? `请根据上传附件重新录入「${enterpriseName}」企业知识库，本次资料作为新的事实来源。`
-              : `请根据上传附件补充「${enterpriseName}」企业知识库缺失资料，优先补齐空字段。`,
+            message: `请根据上传附件生成「${enterpriseName}」企业知识库更新草稿。`,
           },
         }));
       }, 80);
@@ -923,6 +915,19 @@ function KnowledgeDetail({
       setUploadError(error instanceof Error ? error.message : '文档上传或解析失败。');
     } finally {
       setIsUploading(false);
+    }
+  };
+
+  const handleRetrievalTest = async () => {
+    if (!projectId || !retrievalQuery.trim() || !window.geoAgent?.searchKnowledge) {
+      return;
+    }
+    setIsTestingRetrieval(true);
+    try {
+      const response = await window.geoAgent.searchKnowledge(retrievalQuery, projectId, 6);
+      setRetrievalResults(response.entries || []);
+    } finally {
+      setIsTestingRetrieval(false);
     }
   };
 
@@ -990,6 +995,13 @@ function KnowledgeDetail({
             <Edit3 className="h-4 w-4" />
             编辑知识库
           </button>
+          <label
+            className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-xl bg-[#f7f7f5] px-5 py-3 text-[13px] font-bold text-primary transition-colors hover:bg-surface-container dark:bg-surface-variant/45"
+            htmlFor={uploadInputId}
+          >
+            <Upload className="h-4 w-4" />
+            上传资料补充
+          </label>
           <button
             className="inline-flex items-center justify-center gap-2 rounded-xl bg-[#f7f7f5] px-5 py-3 text-[13px] font-bold text-primary transition-colors hover:bg-surface-container dark:bg-surface-variant/45"
             onClick={() => setIsMarkdownOpen(true)}
@@ -1116,31 +1128,13 @@ function KnowledgeDetail({
       </section>
 
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-[1.2fr_0.8fr]">
-        <label className="flex min-h-[190px] cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-outline-variant/50 bg-[#f7f7f5] px-6 py-8 text-center transition-colors hover:border-secondary hover:bg-secondary/5 dark:bg-surface-variant/35">
-          <div className="mb-4 inline-flex rounded-2xl bg-white/70 p-1 text-[12px] font-bold dark:bg-[#1f1f1f]" onClick={(event) => event.preventDefault()}>
-            <button
-              className={`rounded-xl px-3 py-1.5 transition-colors ${knowledgeUpdateMode === 'supplement' ? 'bg-secondary text-on-secondary' : 'text-on-surface-variant hover:text-primary'}`}
-              onClick={() => setKnowledgeUpdateMode('supplement')}
-              type="button"
-            >
-              补充缺失资料
-            </button>
-            <button
-              className={`rounded-xl px-3 py-1.5 transition-colors ${knowledgeUpdateMode === 'replace' ? 'bg-secondary text-on-secondary' : 'text-on-surface-variant hover:text-primary'}`}
-              onClick={() => setKnowledgeUpdateMode('replace')}
-              type="button"
-            >
-              用新资料更新
-            </button>
-          </div>
+        <label className="flex min-h-[150px] cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-outline-variant/50 bg-[#f7f7f5] px-6 py-8 text-center transition-colors hover:border-secondary hover:bg-secondary/5 dark:bg-surface-variant/35">
           <Upload className="mb-3 h-7 w-7 text-secondary" />
           <span className="text-[14px] font-bold text-primary">
-            {isUploading ? '正在生成知识库草稿...' : '更新/补充知识库资料'}
+            {isUploading ? '正在生成更新草稿...' : '上传 Markdown / PDF / Word 文档'}
           </span>
           <span className="mt-2 max-w-2xl text-[13px] leading-relaxed text-on-surface-variant">
-            {knowledgeUpdateMode === 'replace'
-              ? '上传新资料后，AI 会重新录入知识库草稿。确认后以本次资料为准，并重建当前活跃 RAG 索引。'
-              : '上传新资料后，AI 会生成补充草稿。确认后只补齐缺失字段，并追加新的资料片段到本地索引。'}
+            文档会先生成知识库更新草稿，确认后再写入当前企业并建立本地 FTS5 全文检索索引。
           </span>
           <input
             accept=".md,.markdown,.txt,.pdf,.doc,.docx,text/markdown,text/plain,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -1204,27 +1198,44 @@ function KnowledgeDetail({
               ))}
             </div>
           )}
-          <div className="mt-4 rounded-xl bg-white/55 p-3 text-[12px] leading-relaxed dark:bg-[#1f1f1f]">
-            <div className="grid gap-2">
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-on-surface-variant">全文检索</span>
-                <span className="font-bold text-primary">{indexStatus ? 'FTS5 已启用' : '等待状态'}</span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-on-surface-variant">向量索引</span>
-                <span className="font-bold text-primary">
-                  {indexStatus?.vector_backend?.includes('sqlite-vec') ? 'sqlite-vec 已启用' : '仅 FTS5'}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-on-surface-variant">Embedding</span>
-                <span className="font-bold text-primary">{indexStatus?.embedding_backend || '等待状态'}</span>
-              </div>
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-on-surface-variant">向量化片段</span>
-                <span className="font-bold text-primary">{indexStatus?.vector_indexed ?? 0} / {indexStatus?.indexed ?? 0}</span>
-              </div>
+          <div className="mt-4 rounded-xl bg-white/55 p-3 dark:bg-[#1f1f1f]">
+            <div className="flex gap-2">
+              <input
+                className="min-w-0 flex-1 rounded-lg border border-outline-variant/40 bg-white px-3 py-2 text-[12px] text-primary outline-none focus:border-secondary dark:bg-surface"
+                onChange={(event) => setRetrievalQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') handleRetrievalTest();
+                }}
+                placeholder="输入一句问题测试混合检索"
+                value={retrievalQuery}
+              />
+              <button
+                className="shrink-0 rounded-lg bg-primary px-3 py-2 text-[12px] font-bold text-on-primary disabled:opacity-50"
+                disabled={isTestingRetrieval || !retrievalQuery.trim()}
+                onClick={handleRetrievalTest}
+                type="button"
+              >
+                {isTestingRetrieval ? '检索中' : '测试'}
+              </button>
             </div>
+            {retrievalResults.length > 0 && (
+              <div className="mt-3 space-y-2">
+                {retrievalResults.map((entry) => (
+                  <button
+                    className="block w-full rounded-lg bg-white/70 p-2 text-left text-[12px] hover:bg-white dark:bg-surface-variant/45"
+                    key={entry.id}
+                    onClick={() => setDetailEntry(entry)}
+                    type="button"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="min-w-0 truncate font-bold text-primary">{entry.source_filename || entry.title}</span>
+                      <span className="shrink-0 text-secondary">{entry.retrieval_source || 'fts'} {entry.score ? entry.score.toFixed(2) : ''}</span>
+                    </div>
+                    <p className="mt-1 line-clamp-2 text-on-surface-variant">{entry.content}</p>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </section>
@@ -1482,10 +1493,10 @@ function KnowledgeEntriesDialog({
   onSelectEntry: (entry: GeoAgentKnowledgeEntry) => void;
 }) {
   return (
-    <div className="fixed inset-0 z-[90] flex items-start justify-center overflow-y-auto bg-black/35 px-3 py-6 sm:px-4" onClick={onClose} role="presentation">
-      <div className="flex max-h-[calc(100vh-3rem)] w-full max-w-[860px] flex-col rounded-2xl bg-white p-4 shadow-2xl sm:p-5 dark:bg-[#1f1f1f]" onClick={(event) => event.stopPropagation()}>
+    <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/35 px-4 py-8" onClick={onClose} role="presentation">
+      <div className="flex max-h-[86vh] w-full max-w-5xl flex-col rounded-2xl bg-white p-5 shadow-2xl dark:bg-[#1f1f1f]" onClick={(event) => event.stopPropagation()}>
         <div className="flex items-start justify-between gap-4 border-b border-outline-variant/20 pb-4">
-          <div className="min-w-0">
+          <div>
             <h2 className="font-heading text-[20px] font-bold text-primary">原始知识条目</h2>
             <p className="mt-1 text-[12px] text-on-surface-variant">共 {entries.length} 条，点击单条可查看完整内容。</p>
           </div>
@@ -1493,9 +1504,9 @@ function KnowledgeEntriesDialog({
             <X className="h-4 w-4" />
           </button>
         </div>
-        <div className="mt-4 grid min-h-0 gap-3 overflow-y-auto pr-1 xl:grid-cols-2">
+        <div className="mt-4 grid min-h-0 gap-3 overflow-y-auto pr-1 md:grid-cols-2">
           {entries.length > 0 ? entries.map((entry) => (
-            <button className="min-w-0 rounded-xl bg-[#f7f7f5] p-3 text-left transition-colors hover:bg-surface-container sm:p-4 dark:bg-surface-variant/45" key={entry.id} onClick={() => onSelectEntry(entry)} type="button">
+            <button className="min-w-0 rounded-xl bg-[#f7f7f5] p-4 text-left transition-colors hover:bg-surface-container dark:bg-surface-variant/45" key={entry.id} onClick={() => onSelectEntry(entry)} type="button">
               <div className="flex items-start justify-between gap-3">
                 <h3 className="line-clamp-2 font-heading text-[15px] font-bold text-primary">{entry.title}</h3>
                 <span className="shrink-0 rounded-full bg-secondary/10 px-2 py-0.5 font-mono text-[10px] font-bold text-secondary">{entry.embedding_status}</span>
@@ -1504,7 +1515,7 @@ function KnowledgeEntriesDialog({
               <span className="mt-3 block truncate font-mono text-[10px] text-on-surface-variant/60">{entry.source_type} · chunk {entry.chunk_index}</span>
             </button>
           )) : (
-            <div className="rounded-xl border border-dashed border-outline-variant/50 p-8 text-center text-[13px] text-on-surface-variant xl:col-span-2">
+            <div className="rounded-xl border border-dashed border-outline-variant/50 p-8 text-center text-[13px] text-on-surface-variant md:col-span-2">
               暂无知识条目。
             </div>
           )}
@@ -1523,12 +1534,12 @@ function KnowledgeEntryDialog({
 }) {
   return (
     <div
-      className="fixed inset-0 z-[90] flex items-start justify-center overflow-y-auto bg-black/35 px-3 py-6 sm:px-4"
+      className="fixed inset-0 z-[90] flex items-center justify-center bg-black/35 px-4 py-8"
       onClick={onClose}
       role="presentation"
     >
       <div
-        className="flex max-h-[calc(100vh-3rem)] w-full max-w-[760px] flex-col rounded-2xl bg-white p-4 shadow-2xl sm:p-5 dark:bg-[#1f1f1f]"
+        className="flex max-h-[86vh] w-full max-w-3xl flex-col rounded-2xl bg-white p-5 shadow-2xl dark:bg-[#1f1f1f]"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-4 border-b border-outline-variant/20 pb-4">
