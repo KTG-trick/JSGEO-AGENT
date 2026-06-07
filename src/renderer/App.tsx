@@ -16,6 +16,7 @@ import { WebBuilder } from './views/WebBuilder';
 import { ViewState } from './types';
 import { EnterpriseProvider } from './context/EnterpriseContext';
 import { motion } from 'motion/react';
+import { GlobalConfirmDialog } from './components/ConfirmDialog';
 
 export default function App() {
   const [currentView, setCurrentView] = useState<ViewState>('dashboard');
@@ -58,6 +59,7 @@ export default function App() {
             </motion.div>
           ))}
         </Layout>
+        <GlobalConfirmDialog />
       </EnterpriseProvider>
     </div>
   );

@@ -121,6 +121,8 @@ contextBridge.exposeInMainWorld('geoAgent', {
   reviseArticleDraft: (articleId, options = {}) => ipcRenderer.invoke('geo-agent:revise-article-draft', articleId, options),
   markArticleReviewed: (articleId) => ipcRenderer.invoke('geo-agent:mark-article-reviewed', articleId),
   prepareArticlePreview: (articleId) => ipcRenderer.invoke('geo-agent:prepare-article-preview', articleId),
+  getArticlePreviewHtml: (articleId) => ipcRenderer.invoke('geo-agent:get-article-preview-html', articleId),
+  deleteArticleOssPreview: (articleId) => ipcRenderer.invoke('geo-agent:delete-article-oss-preview', articleId),
   syncChaojimeijieResources: (resourceType = 'media', page = 1, size = 200) => ipcRenderer.invoke('geo-agent:sync-chaojimeijie-resources', resourceType, page, size),
   listPublishResources: (filters = {}) => ipcRenderer.invoke('geo-agent:list-publish-resources', filters),
   recommendPublishResources: (articleId, options = {}) => ipcRenderer.invoke('geo-agent:recommend-publish-resources', articleId, options),

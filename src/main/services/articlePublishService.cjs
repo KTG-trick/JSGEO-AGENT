@@ -187,6 +187,30 @@ async function prepareArticlePreview(articleId) {
   };
 }
 
+function getArticlePreviewHtml(articleId) {
+  const draft = articleDraftService.getArticleDraft(articleId);
+  const previewInput = buildPreviewInput(draft);
+  return ossPreviewService.getPreviewHtml(previewInput);
+}
+
+async function deleteArticleOssPreview(articleId) {
+  const draft = articleDraftService.getArticleDraft(articleId);
+  const existing = publicationOf(draft);
+  if (!existing.preview_object_key) {
+    return { success: true, message: '没有需要删除的预览文件' };
+  }
+  const result = await ossPreviewService.deletePreview(existing.preview_object_key);
+  saveDraftWithStatus(articleId, {
+    publication_evidence: {
+      ...(draft.draft.publication_evidence || {}),
+      preview_url: null,
+      preview_object_key: null,
+      preview_generated_at: null,
+    },
+  }, draft.status);
+  return result;
+}
+
 async function markArticleReviewed(articleId) {
   const preview = await prepareArticlePreview(articleId);
   return saveDraftWithStatus(articleId, {
@@ -419,6 +443,8 @@ module.exports = {
   updateArticleDraft,
   markArticleReviewed,
   prepareArticlePreview,
+  getArticlePreviewHtml,
+  deleteArticleOssPreview,
   publishArticle,
   recommendPublishResources,
   syncPublishStatus,

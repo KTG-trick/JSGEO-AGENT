@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
@@ -362,6 +362,14 @@ async function createWindow() {
   });
   mainWindow.on('unmaximize', () => {
     mainWindow.webContents.send('geo-agent:window-maximized-changed', false);
+  });
+
+  // 处理 <a target="_blank"> 链接，在外部浏览器中打开
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      shell.openExternal(url);
+    }
+    return { action: 'deny' };
   });
 
   if (isDev) {
@@ -1433,6 +1441,14 @@ function registerHandlers() {
 
   ipcMain.handle('geo-agent:prepare-article-preview', async (_event, articleId) => {
     return articlePublishService.prepareArticlePreview(articleId);
+  });
+
+  ipcMain.handle('geo-agent:get-article-preview-html', async (_event, articleId) => {
+    return articlePublishService.getArticlePreviewHtml(articleId);
+  });
+
+  ipcMain.handle('geo-agent:delete-article-oss-preview', async (_event, articleId) => {
+    return articlePublishService.deleteArticleOssPreview(articleId);
   });
 
   ipcMain.handle('geo-agent:sync-chaojimeijie-resources', async (_event, resourceType = 'media', page = 1, size = 200) => {

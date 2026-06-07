@@ -409,21 +409,7 @@ function getNextWorkflowAction(
     };
   }
 
-  if (
-    message.sourceDiscovery
-    && message.sourceDiscovery.discovery.status !== 'failed'
-    && !message.articleDraftExecution
-    && !message.supportArticles
-    && !message.supportArticlesPrompt
-    && !phaseFourBlocked
-    && (!stageFourStatus || stageFourStatus === 'ready')
-  ) {
-    return {
-      type: 'support_articles',
-      label: '建议继续执行：阶段四首轮 9 篇内容资产',
-      primaryLabel: '生成 9 篇内容资产',
-    };
-  }
+  // 阶段三完成后直接进入阶段四，不显示"建议继续执行"按钮
 
   const consultingConfirmed = message.supportArticles?.consulting_draft?.status === 'confirmed';
   const reviewConfirmed = message.supportArticles?.review_draft?.status === 'confirmed';
@@ -1742,6 +1728,24 @@ export function AgentStudio() {
         status: discovery!.discovery.status === 'failed' ? 'error' : 'complete',
       }));
       window.dispatchEvent(new CustomEvent('geo-agent-geo-project-changed', { detail: { projectId: report.enterprise_project_id, geoProjectId: report.geo_project_id } }));
+
+      // 阶段三成功完成后，自动创建阶段四的确认消息
+      if (discovery!.discovery.status !== 'failed') {
+        const promptMessageId = `stage-four-prompt-${Date.now()}`;
+        setMessages((current) => [
+          ...current,
+          {
+            id: promptMessageId,
+            role: 'assistant',
+            content: `已准备进入${platformLabelFor(platform)}阶段四：咨询/测评支撑内容生成。`,
+            phaseTwoPlatform: platform,
+            supportArticlesPrompt: discovery!,
+            confirmationState: 'approval-requested',
+            confirmationApproved: undefined,
+            status: 'complete',
+          },
+        ]);
+      }
     } catch (error) {
       const targetId = ensureStageMessage();
       setMessages((current) => updateMessage(current, targetId, {
@@ -2608,9 +2612,11 @@ const ChatBubble: React.FC<{
           onCancel={() => onConfirmSupportArticles(message.id, message.supportArticlesPrompt!)}
           onConfirm={() => onConfirmSupportArticles(message.id, message.supportArticlesPrompt!)}
           state={message.confirmationState ?? 'approval-requested'}
-          title={`生成${platformLabelFor(message.supportArticlesPrompt.platform === 'deepseek' ? 'deepseek' : 'doubao')}阶段四内容资产，会生成首轮支撑文章和排行榜文章草稿。`}
-          confirmLabel="生成内容资产"
-          cancelLabel="重新生成内容资产"
+          title={message.supportArticles
+            ? `重新生成${platformLabelFor(message.supportArticlesPrompt.platform === 'deepseek' ? 'deepseek' : 'doubao')}阶段四内容资产，会重新生成首轮支撑文章和排行榜文章草稿。`
+            : `生成${platformLabelFor(message.supportArticlesPrompt.platform === 'deepseek' ? 'deepseek' : 'doubao')}阶段四内容资产，会生成首轮支撑文章和排行榜文章草稿。`}
+          confirmLabel={message.supportArticles ? '重新生成内容资产' : '生成内容资产'}
+          cancelLabel={message.supportArticles ? '取消' : '重新生成内容资产'}
           busy={message.actionBusy}
         />
       )}

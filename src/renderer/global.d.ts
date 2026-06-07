@@ -797,6 +797,8 @@ declare global {
       }>;
       markArticleReviewed: (articleId: string) => Promise<GeoAgentGeoArticleDraft>;
       prepareArticlePreview: (articleId: string) => Promise<{ url: string; object_key: string; draft: GeoAgentGeoArticleDraft }>;
+      getArticlePreviewHtml: (articleId: string) => Promise<string>;
+      deleteArticleOssPreview: (articleId: string) => Promise<{ success: boolean; object_key?: string; message?: string }>;
       syncChaojimeijieResources: (resourceType?: 'media' | 'we-media', page?: number, size?: number) => Promise<{ resource_type: string; total: number; synced?: number; items: GeoAgentPublishResource[] }>;
       listPublishResources: (filters?: { resourceType?: 'media' | 'we-media'; resource_type?: 'media' | 'we-media'; query?: string; status?: number | string; maxPrice?: number | string; limit?: number }) => Promise<{ provider: string; resource_type: string; resources: GeoAgentPublishResource[] }>;
       recommendPublishResources: (articleId: string, options?: {

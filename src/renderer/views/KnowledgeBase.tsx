@@ -25,6 +25,7 @@ import {
   PROFILE_ARRAY_FIELDS,
   PROFILE_FIELD_DEFINITIONS,
 } from '../lib/profileSchema';
+import { showConfirm } from '../components/ConfirmDialog';
 
 type KnowledgeMode = 'list' | 'detail' | 'builder';
 
@@ -1034,7 +1035,12 @@ function KnowledgeDetail({
 
   const handleDeleteAsset = async (assetId: string) => {
     if (!window.geoAgent?.deleteKnowledgeAsset) return;
-    if (!window.confirm('确认删除这个源文件及其关联知识片段吗？')) return;
+    const confirmed = await showConfirm({
+      title: '确认删除',
+      message: '确认删除这个源文件及其关联知识片段吗？',
+      variant: 'danger',
+    });
+    if (!confirmed) return;
     onStatusChange(await window.geoAgent.deleteKnowledgeAsset(assetId));
     await onRefresh();
   };

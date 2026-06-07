@@ -87,6 +87,7 @@ async function uploadPreview({ projectId, articleId, title, content, owner }) {
       Date: date,
       'Content-Type': contentType,
       'Content-MD5': contentMd5,
+      'Content-Disposition': 'inline',
     },
     body,
   });
@@ -102,8 +103,97 @@ async function uploadPreview({ projectId, articleId, title, content, owner }) {
   };
 }
 
+async function deletePreview(objectKey) {
+  const region = requiredEnv('ALI_OSS_REGION');
+  const bucket = requiredEnv('ALI_OSS_BUCKET');
+  const accessKeyId = requiredEnv('ALI_OSS_ACCESS_KEY_ID');
+  const accessKeySecret = requiredEnv('ALI_OSS_ACCESS_KEY_SECRET');
+  const host = `${bucket}.${region}.aliyuncs.com`;
+  const resource = `/${bucket}/${objectKey}`;
+  const method = 'DELETE';
+  const date = new Date().toUTCString();
+  const authorization = buildOssAuthorization({
+    method,
+    contentMd5: '',
+    contentType: '',
+    date,
+    resource,
+    accessKeyId,
+    accessKeySecret,
+  });
+
+  const response = await fetch(`https://${host}/${objectKey}`, {
+    method,
+    headers: {
+      Authorization: authorization,
+      Date: date,
+    },
+  });
+
+  // 404表示文件不存在，也视为成功
+  if (!response.ok && response.status !== 404) {
+    const errorText = await response.text().catch(() => '');
+    throw new Error(`OSS 删除失败：${response.status} ${errorText.slice(0, 200)}`);
+  }
+
+  return { success: true, object_key: objectKey };
+}
+
+async function deletePreviewByProject(projectId) {
+  const region = requiredEnv('ALI_OSS_REGION');
+  const bucket = requiredEnv('ALI_OSS_BUCKET');
+  const accessKeyId = requiredEnv('ALI_OSS_ACCESS_KEY_ID');
+  const accessKeySecret = requiredEnv('ALI_OSS_ACCESS_KEY_SECRET');
+  const host = `${bucket}.${region}.aliyuncs.com`;
+  const prefix = `geo-agent/previews/${encodeURIComponent(projectId)}/`;
+
+  // 列出该项目下的所有文件
+  const listResource = `/${bucket}/?prefix=${prefix}&delimiter=/`;
+  const listDate = new Date().toUTCString();
+  const listAuthorization = buildOssAuthorization({
+    method: 'GET',
+    contentMd5: '',
+    contentType: '',
+    date: listDate,
+    resource: listResource,
+    accessKeyId,
+    accessKeySecret,
+  });
+
+  const listResponse = await fetch(`https://${host}/?prefix=${prefix}&delimiter=/`, {
+    method: 'GET',
+    headers: {
+      Authorization: listAuthorization,
+      Date: listDate,
+    },
+  });
+
+  if (!listResponse.ok) {
+    const errorText = await listResponse.text().catch(() => '');
+    throw new Error(`OSS 列举文件失败：${listResponse.status} ${errorText.slice(0, 200)}`);
+  }
+
+  const listText = await listResponse.text();
+  const keyMatches = listText.match(/<Key>([^<]+)<\/Key>/g) || [];
+  const keys = keyMatches.map((m) => m.replace(/<\/?Key>/g, ''));
+
+  // 逐个删除
+  for (const key of keys) {
+    await deletePreview(key);
+  }
+
+  return { success: true, deleted_count: keys.length };
+}
+
+function getPreviewHtml({ title, content, owner }) {
+  return renderPreviewHtml({ title, content, owner });
+}
+
 module.exports = {
   escapeHtml,
   renderPreviewHtml,
+  getPreviewHtml,
   uploadPreview,
+  deletePreview,
+  deletePreviewByProject,
 };

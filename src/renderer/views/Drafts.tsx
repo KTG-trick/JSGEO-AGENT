@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Ban, Bell, CheckCircle2, CircleDollarSign, ExternalLink, FileText, Filter, Loader2, PenLine, RefreshCw, RotateCcw, Search, Send, Shield, Sparkles, Trash2, Trophy, X } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useEnterprise } from '../context/EnterpriseContext';
+import { PreviewDialog } from '../components/PreviewDialog';
+import { showConfirm } from '../components/ConfirmDialog';
 
 type StatusFilter = 'all' | 'draft' | 'reviewed' | 'publishing' | 'published' | 'failed';
 type RoleFilter = 'all' | 'support' | 'ranking';
@@ -71,6 +73,7 @@ export function Drafts() {
   const [selectedDraftIntent, setSelectedDraftIntent] = useState<'edit' | 'ai'>('edit');
   const [resourceDraft, setResourceDraft] = useState<GeoAgentGeoArticleDraft | null>(null);
   const [isSyncingOrders, setIsSyncingOrders] = useState(false);
+  const [previewDraft, setPreviewDraft] = useState<GeoAgentGeoArticleDraft | null>(null);
 
   const loadDrafts = useCallback(async () => {
     if (!currentEnterpriseId || !window.geoAgent?.listArticleDrafts) {
@@ -137,7 +140,12 @@ export function Drafts() {
       setError(`${actionLabel[action]}需要填写原因。`);
       return;
     }
-    if (!window.confirm(`确认${actionLabel[action]}？`)) return;
+    const confirmed = await showConfirm({
+      title: `确认${actionLabel[action]}`,
+      message: `确认要${actionLabel[action]}吗？`,
+      variant: action === 'cancel' ? 'warning' : 'info',
+    });
+    if (!confirmed) return;
     setError(null);
     try {
       await window.geoAgent.managePublishOrder(draft.id, action, { reason: text(reason) });
@@ -155,9 +163,18 @@ export function Drafts() {
       return;
     }
     const title = text(draft.draft.title) || '未命名草稿';
-    if (!window.confirm(`确认移除草稿「${title}」？移除后默认列表将不再展示。`)) return;
+    const confirmed = await showConfirm({
+      title: '确认移除草稿',
+      message: `确认移除草稿「${title}」吗？移除后默认列表将不再展示。`,
+      variant: 'danger',
+    });
+    if (!confirmed) return;
     setError(null);
     try {
+      // 同步删除OSS预览文件
+      if (window.geoAgent?.deleteArticleOssPreview && publication(draft).preview_object_key) {
+        await window.geoAgent.deleteArticleOssPreview(draft.id).catch(() => {});
+      }
       await window.geoAgent.updateArticleDraft(draft.id, {
         status: 'archived',
         publication_evidence: {
@@ -302,6 +319,7 @@ export function Drafts() {
                   onRemove={() => removeDraft(draft)}
                   onSyncOrder={() => syncOrder(draft)}
                   onManageOrder={(action) => manageOrder(draft, action)}
+                  onPreview={() => setPreviewDraft(draft)}
                 />
               ))}
             </tbody>
@@ -328,6 +346,13 @@ export function Drafts() {
             setResourceDraft(null);
             await loadDrafts();
           }}
+        />
+      )}
+      {previewDraft && (
+        <PreviewDialog
+          articleId={previewDraft.id}
+          open={!!previewDraft}
+          onClose={() => setPreviewDraft(null)}
         />
       )}
     </DraftPageShell>
@@ -395,9 +420,10 @@ type DraftRowProps = {
   onRemove: () => void;
   onSyncOrder: () => void;
   onManageOrder: (action: PublishOrderAction) => void;
+  onPreview: () => void;
 };
 
-const DraftRow: React.FC<DraftRowProps> = ({ draft, rankingReady, onAiEdit, onEdit, onMarkReviewed, onPublish, onRemove, onSyncOrder, onManageOrder }) => {
+const DraftRow: React.FC<DraftRowProps> = ({ draft, rankingReady, onAiEdit, onEdit, onMarkReviewed, onPublish, onRemove, onSyncOrder, onManageOrder, onPreview }) => {
   const role = articleRole(draft);
   const status = publishStatus(draft);
   const evidence = publication(draft);
@@ -437,10 +463,13 @@ const DraftRow: React.FC<DraftRowProps> = ({ draft, rankingReady, onAiEdit, onEd
             {publishedUrl}
           </a>
         ) : previewUrl ? (
-          <a className="inline-flex max-w-[220px] items-center gap-1 truncate text-secondary hover:underline" href={previewUrl} rel="noreferrer" target="_blank">
+          <button
+            className="inline-flex max-w-[220px] items-center gap-1 truncate text-secondary hover:underline"
+            onClick={onPreview}
+          >
             <ExternalLink className="size-3" />
             OSS 预览
-          </a>
+          </button>
         ) : (
           <span>{order ? `超级媒介订单：${order.partner_sn}` : '校对后生成 OSS 预览'}</span>
         )}

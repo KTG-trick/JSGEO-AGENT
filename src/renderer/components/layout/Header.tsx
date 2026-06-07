@@ -3,6 +3,7 @@ import { Bell, Globe, Building2, ChevronDown, Check, Trash2 } from 'lucide-react
 import { useEnterprise } from '../../context/EnterpriseContext';
 import { cn } from '../../lib/utils';
 import { ViewState } from '../../types';
+import { showConfirm } from '../ConfirmDialog';
 
 const CURRENT_CONVERSATION_STORAGE_PREFIX = 'geo-agent-current-conversation-id';
 const PHASE_TWO_PROMPT_STORAGE_KEY = 'geo-agent-phase-two-prompts-v2';
@@ -179,7 +180,11 @@ export function Header({ currentView, isSidebarCollapsed }: HeaderProps) {
     if (!window.geoAgent?.deleteConversation) {
       return;
     }
-    const confirmed = window.confirm(`确定删除「${title}」这条对话记录吗？`);
+    const confirmed = await showConfirm({
+      title: '确认删除对话',
+      message: `确定删除「${title}」这条对话记录吗？`,
+      variant: 'danger',
+    });
     if (!confirmed) {
       return;
     }
