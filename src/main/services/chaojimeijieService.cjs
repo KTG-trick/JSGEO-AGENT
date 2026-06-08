@@ -86,8 +86,15 @@ function flatten(value, separator = '') {
 }
 
 function signPayload(payload, secret) {
-  const algorithm = payload.algorithm || 'sha256';
-  return crypto.createHmac(algorithm, secret).update(flatten(payload)).digest('hex');
+  // 超级媒介 API 签名算法：HMAC-SHA256(secret, sorted_key_value_string)
+  // 所有参数按 key 字母排序，拼接为 key1=value1key2=value2... 格式（无分隔符）
+  // 注意：需要跳过 undefined、null 和空字符串值，与 encodeQuery 行为保持一致
+  const stringToSign = Object.keys(payload)
+    .filter((key) => key !== 'signature' && payload[key] != null && payload[key] !== '')
+    .sort()
+    .map((key) => `${key}=${payload[key]}`)
+    .join('');
+  return crypto.createHmac('sha256', secret).update(stringToSign).digest('hex');
 }
 
 function withAuth(params = {}) {
@@ -118,6 +125,20 @@ function encodeQuery(params) {
   return query.toString();
 }
 
+function encodeBody(params) {
+  // 对于 POST 请求，手动拼接请求体，不使用 URL 编码
+  // 因为签名是基于原始值计算的，URL 编码会导致签名不匹配
+  return Object.entries(params)
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .map(([key, value]) => {
+      if (Array.isArray(value)) {
+        return value.map((item) => `${key}[]=${item}`).join('&');
+      }
+      return `${key}=${value}`;
+    })
+    .join('&');
+}
+
 async function request(resourceType, action, params = {}, method = 'GET') {
   const baseUrl = text(process.env.CHAOJIMEIJIE_API_BASE_URL) || API_BASE_URL;
   const payload = withAuth(params);
@@ -129,7 +150,7 @@ async function request(resourceType, action, params = {}, method = 'GET') {
     if (query) url.search = query;
   } else {
     init.headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
-    init.body = encodeQuery(payload);
+    init.body = encodeBody(payload);
   }
 
   const response = await fetch(url, init);
