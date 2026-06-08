@@ -388,12 +388,12 @@ function Metric({ label, value }: { label: string; value: number }) {
 
 function Segmented({ value, options, onChange }: { value: string; options: Array<[string, string]>; onChange: (value: string) => void }) {
   return (
-    <div className="flex w-fit rounded-md border border-outline-variant/40 bg-surface-container p-1">
+    <div className="flex w-fit flex-nowrap rounded-md border border-outline-variant/40 bg-surface-container p-1">
       {options.map(([optionValue, label]) => (
         <button
           key={optionValue}
           className={cn(
-            'rounded px-3 py-1.5 text-[11px] font-bold transition-colors',
+            'whitespace-nowrap rounded px-3 py-1.5 text-[11px] font-bold transition-colors',
             value === optionValue ? 'bg-surface text-primary shadow-sm' : 'text-on-surface-variant hover:text-primary'
           )}
           onClick={() => onChange(optionValue)}
@@ -441,7 +441,7 @@ const DraftRow: React.FC<DraftRowProps> = ({ draft, rankingReady, onAiEdit, onEd
       </td>
       <td className="px-5 py-4 align-top">
         <span className={cn(
-          'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-bold',
+          'inline-flex whitespace-nowrap items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-bold',
           role === 'ranking'
             ? 'bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-200'
             : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200'
@@ -452,7 +452,7 @@ const DraftRow: React.FC<DraftRowProps> = ({ draft, rankingReady, onAiEdit, onEd
         <div className="mt-1 text-[12px] text-on-surface-variant">{text(draft.draft.article_theme) || draft.article_type}</div>
       </td>
       <td className="px-5 py-4 align-top">
-        <span className={cn('inline-flex rounded-full px-2.5 py-1 text-[11px] font-bold', STATUS_STYLES[status] || STATUS_STYLES.draft)}>
+        <span className={cn('inline-flex whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] font-bold', STATUS_STYLES[status] || STATUS_STYLES.draft)}>
           {statusLabel(status)}
         </span>
       </td>
@@ -968,7 +968,7 @@ function PublishResourceModal({ draft, onClose, onSaved }: { draft: GeoAgentGeoA
 
 function Modal({ children, onClose, title }: { children: React.ReactNode; onClose: () => void; title: string }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 p-4">
       <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-lg bg-surface p-5 shadow-xl">
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-[16px] font-bold text-primary">{title}</h3>
