@@ -47,7 +47,7 @@ export function TitleBar() {
 
   return (
     <div
-      className="h-10 flex items-center bg-surface-container-low"
+      className="h-10 flex items-center bg-surface-container-low relative z-[1]"
       style={{ WebkitAppRegion: 'drag' }}
     >
       {/* 左侧：窗口控制按钮 */}

@@ -21,6 +21,8 @@ const visibilityCheckService = require('./services/visibilityCheckService.cjs');
 const reflectionService = require('./services/reflectionService.cjs');
 const skillService = require('./services/skillService.cjs');
 const { fieldText } = require('./services/profileFieldService.cjs');
+const llmGateway = require('./services/llmGateway.cjs');
+const contextWindowService = require('./services/contextWindowService.cjs');
 
 const rootDir = path.resolve(__dirname, '..', '..');
 const isDev = !app.isPackaged;
@@ -763,21 +765,76 @@ function registerHandlers() {
         metadata: { type: 'chat_user' },
       });
 
-      const provider = 'electron-main';
-      const model = payload.selected_model || 'auto-placeholder';
-      const assistantContent = '新的 Electron-only 智能助手正在接入本地 RAG。当前这条回复已通过流式通道返回，并已写入当前企业的聊天历史。';
-      event.sender.send(channel, {
-        type: 'meta',
-        conversation_id: conversation.id,
-        provider,
-        model,
+      // 使用上下文窗口管理服务构建消息历史
+      const contextMessages = await contextWindowService.buildContextWindow(
+        conversation.id,
+        projectId,
+        { maxTokens: 100000, recentMessageCount: 8 }
+      );
+
+      // 构建最终消息数组（systemPrompt 需要包装成 {role, content} 格式）
+      const messages = [
+        {
+          role: 'system',
+          content: contextMessages.systemPrompt,
+        },
+        ...contextMessages.history,
+        {
+          role: 'user',
+          content: payload.message || '',
+        },
+      ];
+
+      // 记录 token 使用情况（用于调试）
+      console.log('[chat-stream] Token usage:', contextMessages.tokenUsage);
+
+      let assistantContent = '';
+      let provider = '';
+      let model = '';
+      let reasoningContent = null;
+
+      // 调用真正的 LLM（使用豆包模型）
+      await llmGateway.chatCompletionStream({
+        messages,
+        temperature: 0.7,
+        maxTokens: 4000,
+        taskType: 'chat_completion',
+        provider: 'ark',
+        model: process.env.DOUBAO_MODEL || 'doubao-seed-2-0-lite-260428',
+        onEvent: (streamEvent) => {
+          if (streamEvent.type === 'model_start' || streamEvent.type === 'model_status') {
+            provider = streamEvent.provider || provider;
+            model = streamEvent.model || model;
+            event.sender.send(channel, {
+              type: 'meta',
+              conversation_id: conversation.id,
+              provider,
+              model,
+            });
+          }
+          if (streamEvent.type === 'status') {
+            event.sender.send(channel, {
+              type: 'status',
+              message: streamEvent.message || '正在处理...',
+              conversation_id: conversation.id,
+            });
+          }
+          if (streamEvent.type === 'reasoning_delta' && streamEvent.text) {
+            reasoningContent = (reasoningContent || '') + streamEvent.text;
+            event.sender.send(channel, {
+              type: 'reasoning_delta',
+              text: streamEvent.text,
+            });
+          }
+          if (streamEvent.type === 'delta' && streamEvent.text) {
+            assistantContent += streamEvent.text;
+            event.sender.send(channel, {
+              type: 'delta',
+              text: streamEvent.text,
+            });
+          }
+        },
       });
-      event.sender.send(channel, {
-        type: 'status',
-        message: '姝ｅ湪鍐欏叆褰撳墠浼佷笟鑱婂ぉ鍘嗗彶...',
-        conversation_id: conversation.id,
-      });
-      await emitTextDeltas(event.sender, channel, assistantContent);
 
       conversationService.addMessage({
         conversationId: conversation.id,
@@ -802,7 +859,7 @@ function registerHandlers() {
         search_queries: [],
         search_actions: [],
         search_usage: {},
-        reasoning_content: null,
+        reasoning_content: reasoningContent,
       });
       return {
         type: 'done',
@@ -815,7 +872,7 @@ function registerHandlers() {
         search_queries: [],
         search_actions: [],
         search_usage: {},
-        reasoning_content: null,
+        reasoning_content: reasoningContent,
       };
     } catch (error) {
       const message = error.message || String(error);
@@ -832,6 +889,41 @@ function registerHandlers() {
     conversationService.clearConversationHistory(payload));
   ipcMain.handle('geo-agent:delete-conversation', async (_event, conversationId) =>
     conversationService.deleteConversation(conversationId));
+
+  // 附件管理 IPC handlers
+  const attachmentService = require('./services/attachmentService.cjs');
+
+  ipcMain.handle('geo-agent:upload-chat-attachment', async (_event, payload = {}) => {
+    return attachmentService.uploadAttachment({
+      projectId: payload.projectId,
+      conversationId: payload.conversationId,
+      messageId: payload.messageId,
+      filename: payload.filename,
+      mimeType: payload.mimeType,
+      content: payload.content,
+    });
+  });
+
+  ipcMain.handle('geo-agent:get-chat-attachment', async (_event, attachmentId) => {
+    return attachmentService.getAttachment(attachmentId);
+  });
+
+  ipcMain.handle('geo-agent:get-chat-attachment-content', async (_event, attachmentId) => {
+    return attachmentService.getAttachmentContent(attachmentId);
+  });
+
+  ipcMain.handle('geo-agent:get-attachments-for-message', async (_event, messageId) => {
+    return attachmentService.getAttachmentsForMessage(messageId);
+  });
+
+  ipcMain.handle('geo-agent:get-attachments-for-conversation', async (_event, conversationId) => {
+    return attachmentService.getAttachmentsForConversation(conversationId);
+  });
+
+  ipcMain.handle('geo-agent:delete-chat-attachment', async (_event, attachmentId) => {
+    return attachmentService.deleteAttachment(attachmentId);
+  });
+
   ipcMain.handle('geo-agent:run-geo-source-discovery', async (_event, geoProjectId, platform, fallbackReport = null) =>
     sourceDiscoveryService.generateSourceDiscovery({ geoProjectId, platform, fallbackReport }));
   ipcMain.handle('geo-agent:run-geo-source-discovery-stream', async (event, request = {}) => {

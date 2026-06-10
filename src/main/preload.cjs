@@ -87,6 +87,13 @@ contextBridge.exposeInMainWorld('geoAgent', {
       project_id: options.projectId,
     });
   },
+  // 附件管理
+  uploadChatAttachment: (payload) => ipcRenderer.invoke('geo-agent:upload-chat-attachment', payload),
+  getChatAttachment: (attachmentId) => ipcRenderer.invoke('geo-agent:get-chat-attachment', attachmentId),
+  getChatAttachmentContent: (attachmentId) => ipcRenderer.invoke('geo-agent:get-chat-attachment-content', attachmentId),
+  getAttachmentsForMessage: (messageId) => ipcRenderer.invoke('geo-agent:get-attachments-for-message', messageId),
+  getAttachmentsForConversation: (conversationId) => ipcRenderer.invoke('geo-agent:get-attachments-for-conversation', conversationId),
+  deleteChatAttachment: (attachmentId) => ipcRenderer.invoke('geo-agent:delete-chat-attachment', attachmentId),
   getProjects: () => ipcRenderer.invoke('geo-agent:get-projects'),
   createProject: (payload) => ipcRenderer.invoke('geo-agent:create-project', payload),
   getProject: (projectId) => ipcRenderer.invoke('geo-agent:get-project', projectId),

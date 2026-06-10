@@ -67,7 +67,7 @@ export function Layout({ currentView, onViewChange, children }: LayoutProps) {
           "flex-1 overflow-y-auto pb-xl w-full transition-[padding] duration-300 relative",
           isCollapsed ? "md:pl-0" : "md:pl-[240px]"
         )}>
-          <div className="relative z-10 w-full h-full">
+          <div className="relative w-full h-full">
             {children}
           </div>
         </main>

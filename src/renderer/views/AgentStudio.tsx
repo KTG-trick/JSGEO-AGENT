@@ -10,6 +10,7 @@ import {
   FileText,
   Globe,
   GraduationCap,
+  History,
   Info,
   Library,
   Mic,
@@ -40,6 +41,7 @@ import {
   ConversationContent,
   ConversationScrollButton,
 } from '../components/ai-elements/conversation';
+import { ConversationHistoryPanel } from '../components/ConversationHistoryPanel';
 import {
   Message,
   MessageActions,
@@ -110,10 +112,33 @@ type PromptAttachment = {
   type?: string;
 };
 
+/**
+ * ChatMessage 类型定义
+ *
+ * 职责划分：
+ * - 基础字段：id, role, content, status, error
+ * - 用户消息字段：attachmentIds, suggestions
+ * - 助手消息字段：reasoning, reasoningContent, reasoningSteps, modelDebugLines, draftStreamSections, sources, searchQueries, searchActions, searchUsage, liveSearchSteps, provider, model, actionBusy
+ * - GEO 流程字段：knowledgeDraft, phaseTwoPrompt, phaseTwoPlatform, phaseTwoExecution, geoReport, sourceDiscoveryExecution, sourceDiscovery, sourceDiscoveryAttempted, articleDraftExecution, articleDraft, supportArticles, supportArticlesPrompt, articleDraftAttempts, confirmationState, confirmationApproved, progressiveDraftGroups, geoProjectId
+ */
 type ChatMessage = {
+  // 基础字段
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  status?: 'streaming' | 'complete' | 'error';
+  error?: string | null;
+
+  // 用户消息字段
+  attachmentIds?: string[];
+  suggestions?: Array<{
+    label: string;
+    value: string;
+    icon?: React.ComponentType<{ className?: string }>;
+    variant?: 'default' | 'secondary' | 'outline';
+  }>;
+
+  // 助手消息字段
   reasoning?: string;
   reasoningContent?: string;
   reasoningSteps?: Array<{ label: string; detail?: string; status: 'active' | 'complete' | 'pending' }>;
@@ -124,6 +149,11 @@ type ChatMessage = {
   searchActions?: SearchAction[];
   searchUsage?: SearchUsage;
   liveSearchSteps?: Array<{ query: string; status: 'in_progress' | 'completed' }>;
+  provider?: string;
+  model?: string;
+  actionBusy?: boolean;
+
+  // GEO 流程字段
   knowledgeDraft?: GeoAgentKnowledgeDraft;
   phaseTwoPrompt?: GeoAgentGeoProject;
   phaseTwoPlatform?: 'doubao' | 'deepseek';
@@ -150,11 +180,6 @@ type ChatMessage = {
   articleDraftAttempts?: Partial<Record<'consulting' | 'review', boolean>>;
   confirmationState?: 'approval-requested' | 'approval-responded' | 'output-available';
   confirmationApproved?: boolean;
-  status?: 'streaming' | 'complete' | 'error';
-  provider?: string;
-  model?: string;
-  error?: string | null;
-  actionBusy?: boolean;
   progressiveDraftGroups?: number;
   geoProjectId?: string;
 };
@@ -162,7 +187,7 @@ type ChatMessage = {
 type ConfigStatus = Awaited<ReturnType<NonNullable<Window['geoAgent']>['getConfigStatus']>>;
 const AUTO_PLATFORM: 'doubao' = 'doubao';
 
-const DEFAULT_INPUT_PLACEHOLDER = '输入 GEO 任务，例如：为成都行乐音改建立企业知识库...';
+const DEFAULT_INPUT_PLACEHOLDER = '输入问题或任务，例如：帮我分析这个文件、建立企业知识库...';
 const CURRENT_CONVERSATION_STORAGE_PREFIX = 'geo-agent-current-conversation-id';
 const PHASE_TWO_PROMPT_STORAGE_KEY = 'geo-agent-phase-two-prompts-v2';
 const CONVERSATION_HISTORY_RESET_KEY = 'geo-agent-conversation-history-reset-v2';
@@ -547,17 +572,107 @@ function slugifyProjectId(value: string) {
 
 function inferKnowledgeIntent(text: string, hasFiles: boolean, isKnowledgeSkill: boolean) {
   const normalized = text.toLowerCase();
-  const wantsNew = isKnowledgeSkill
-    || /新建|创建|建立|录入|新增|另建|从零/.test(text)
-    || (hasFiles && /知识库|企业资料|公司资料|企业介绍/.test(text));
-  const wantsUpdate = /补充|更新|编辑|修改|追加|完善|修正|加入|写入|保存到/.test(text);
-  if (wantsNew && !wantsUpdate) {
+
+  // 明确的知识库创建意图关键词
+  const createIntentKeywords = /新建|创建|建立|录入|新增|另建|从零|知识库|企业资料|公司资料|企业介绍|构建.*库|搭建.*库|整理.*资料|整理.*文档/;
+
+  // 明确的知识库更新意图关键词
+  const updateIntentKeywords = /补充|更新|编辑|修改|追加|完善|修正|加入|写入|保存到|更新.*知识库|补充.*资料|追加.*内容/;
+
+  // 选择知识库技能时，保持原有逻辑不变
+  const wantsCreate = isKnowledgeSkill || createIntentKeywords.test(text);
+  const wantsUpdate = updateIntentKeywords.test(text);
+
+  if (wantsCreate && !wantsUpdate) {
     return 'create' as const;
   }
   if (wantsUpdate) {
     return 'update' as const;
   }
-  return hasFiles ? ('create' as const) : ('chat' as const);
+
+  // 关键修改：有附件但没有明确意图时，返回 'chat' 而不是 'create'
+  // 这样用户上传文件后可以进行普通对话，而不是强制进入知识库流程
+  return 'chat' as const;
+}
+
+function generateSuggestions(context: {
+  hasFiles: boolean;
+  knowledgeIntent: 'create' | 'update' | 'chat';
+  messageContent: string;
+  hasEnterprise: boolean;
+  isKnowledgeSkillSelected: boolean;
+  workflowState?: GeoAgentWorkflowState | null;
+  geoProject?: GeoAgentGeoProject | null;
+}): Array<{ label: string; value: string; icon?: React.ComponentType<{ className?: string }>; variant?: 'default' | 'secondary' | 'outline' }> {
+  const suggestions: Array<{ label: string; value: string; icon?: React.ComponentType<{ className?: string }>; variant?: 'default' | 'secondary' | 'outline' }> = [];
+
+  // 如果用户已选择知识库技能，不显示建议
+  if (context.isKnowledgeSkillSelected) {
+    return suggestions;
+  }
+
+  // 场景 1：用户表明创建知识库意图但没有文件，引导上传文件
+  if (context.knowledgeIntent === 'create' && !context.hasFiles) {
+    suggestions.push(
+      { label: '上传企业资料', value: '请上传企业资料文件（Word、PDF、Markdown等），我将为您创建知识库。', icon: Upload, variant: 'default' }
+    );
+    return suggestions;
+  }
+
+  // 场景 2：用户表明更新知识库意图但没有文件，引导上传文件
+  if (context.knowledgeIntent === 'update' && !context.hasFiles) {
+    suggestions.push(
+      { label: '上传补充资料', value: '请上传需要补充到知识库的资料文件。', icon: Upload, variant: 'default' }
+    );
+    return suggestions;
+  }
+
+  // 场景 3：上传文件后，没有明确知识库意图
+  if (context.hasFiles && context.knowledgeIntent === 'chat') {
+    suggestions.push(
+      { label: '建立知识库', value: '我想建立企业知识库，请帮我分析这些文件并生成草稿。', icon: Database, variant: 'default' },
+      { label: '分析文件内容', value: '请详细分析我上传的文件内容，告诉我主要信息。', icon: FileText, variant: 'secondary' }
+    );
+    return suggestions;
+  }
+
+  // 场景 4：用户没有企业知识库
+  if (!context.hasEnterprise && context.knowledgeIntent === 'chat') {
+    suggestions.push(
+      { label: '建立知识库', value: '我想建立企业知识库，请引导我上传资料并生成草稿。', icon: Database, variant: 'default' },
+      { label: '了解录入要求', value: '请说明建立企业知识库需要准备哪些资料。', icon: Info, variant: 'secondary' }
+    );
+    return suggestions;
+  }
+
+  // 场景 5：用户有企业知识库，根据消息内容生成建议
+  const lowerContent = context.messageContent.toLowerCase();
+
+  // 询问知识库相关
+  if (/知识库|企业资料|公司介绍|公司信息/.test(lowerContent)) {
+    suggestions.push(
+      { label: '查看知识库', value: '请查看当前企业知识库的完整内容。', icon: Database, variant: 'default' },
+      { label: '补充知识库', value: '请检查知识库还有哪些缺失项。', icon: Plus, variant: 'secondary' }
+    );
+  }
+
+  // 询问 GEO 优化相关
+  if (/geo|优化|排名|搜索|关键词|长尾/.test(lowerContent)) {
+    suggestions.push(
+      { label: '分析 GEO 缺口', value: `基于当前企业知识库，分析${context.geoProject?.company_name || '企业'}在豆包和 DeepSeek 的 GEO 缺口。`, icon: Target, variant: 'default' },
+      { label: '生成关键词', value: `根据${context.geoProject?.company_name || '企业'}的企业知识库，生成目标关键词和长尾用户问题。`, icon: Search, variant: 'secondary' }
+    );
+  }
+
+  // 场景 6：通用建议（当没有其他建议时）
+  if (suggestions.length === 0) {
+    suggestions.push(
+      { label: '了解 GEO 优化', value: '请介绍什么是 GEO 优化，以及如何为企业进行 GEO 优化。', icon: Info, variant: 'secondary' },
+      { label: '查看企业信息', value: '请查看当前企业的基本信息和知识库状态。', icon: Database, variant: 'outline' }
+    );
+  }
+
+  return suggestions;
 }
 
 function extractCompanyHint(text: string) {
@@ -811,6 +926,18 @@ export function AgentStudio() {
     messageId: string;
     draft: GeoAgentKnowledgeDraft;
   } | null>(null);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [conversationHistory, setConversationHistory] = useState<Array<{
+    id: string;
+    project_id?: string | null;
+    kind: string;
+    title: string;
+    summary?: string | null;
+    message_count: number;
+    last_message_preview?: string | null;
+    created_at: string;
+    updated_at: string;
+  }>>([]);
 
   const supplementDraftOverlay = supplementDraftDialog ? (
     <SupplementDraftDialog
@@ -888,6 +1015,31 @@ export function AgentStudio() {
       .catch(() => setSkills([]));
   }, []);
 
+  // 获取对话历史
+  useEffect(() => {
+    if (!window.geoAgent?.getConversations) {
+      return;
+    }
+
+    const fetchConversations = () => {
+      window.geoAgent!.getConversations(currentEnterprise?.id)
+        .then((response) => setConversationHistory(response.conversations ?? []))
+        .catch(() => setConversationHistory([]));
+    };
+
+    fetchConversations();
+
+    // 监听对话变化事件
+    const handleConversationChanged = () => fetchConversations();
+    window.addEventListener('geo-agent-conversation-changed', handleConversationChanged);
+    window.addEventListener('geo-agent-conversations-refresh', handleConversationChanged);
+
+    return () => {
+      window.removeEventListener('geo-agent-conversation-changed', handleConversationChanged);
+      window.removeEventListener('geo-agent-conversations-refresh', handleConversationChanged);
+    };
+  }, [currentEnterprise?.id]);
+
   useEffect(() => {
     if (hasEnterprises || selectedSkill || conversationId || messages.length > 0) {
       return;
@@ -896,7 +1048,7 @@ export function AgentStudio() {
     if (knowledgeSkill) {
       setSelectedSkill(knowledgeSkill);
     }
-  }, [conversationId, hasEnterprises, messages.length, selectedSkill, skills]);
+  }, [conversationId, hasEnterprises, messages.length, skills]);
 
   useEffect(() => {
     if (!pendingKnowledgeIngestRef.current || selectedSkill) {
@@ -1044,14 +1196,17 @@ export function AgentStudio() {
 
   const sendMessage = async (text?: string, files: PromptAttachment[] = []) => {
     const knowledgeSkill = skills.find((skill) => skill.id === 'knowledge-base-ingest' || skill.name.includes('知识库'));
-    const activeSkill = selectedSkill ?? (!hasEnterprises ? knowledgeSkill ?? null : null);
+    // 只有当用户主动选择知识库技能时才激活，不再自动选择
+    // 这样用户可以在没有企业知识库的情况下进行普通对话
+    const activeSkill = selectedSkill ?? null;
     const isKnowledgeIngestSkill = !!activeSkill && (activeSkill.id === 'knowledge-base-ingest' || activeSkill.name.includes('知识库'));
     const hasFiles = files.length > 0;
     const rawContent = (text ?? inputValue).trim();
     const knowledgeIntent = inferKnowledgeIntent(rawContent, hasFiles, isKnowledgeIngestSkill);
-    const shouldUseDispatcher = hasFiles || isKnowledgeIngestSkill;
+    const shouldUseDispatcher = (hasFiles && knowledgeIntent !== 'chat') || isKnowledgeIngestSkill;
     const content = rawContent
-      || (hasFiles ? `已上传 ${files.length} 个附件，请解析并写入企业知识库。` : '')
+      || (hasFiles && knowledgeIntent !== 'chat' ? `已上传 ${files.length} 个附件，请解析并写入企业知识库。` : '')
+      || (hasFiles && knowledgeIntent === 'chat' ? `我上传了 ${files.length} 个文件，请帮我分析。` : '')
       || (activeSkill ? `请开始使用${activeSkill.name}技能，引导我完成任务。` : '');
     if ((!content && !hasFiles) || isSending) {
       return;
@@ -1059,7 +1214,56 @@ export function AgentStudio() {
 
     const shouldShowReasoning = shouldUseDispatcher;
     const timestamp = Date.now();
-    const userMessage: ChatMessage = { id: `user-${timestamp}`, role: 'user', content };
+    // 保存附件信息到用户消息中
+    let userAttachments: Array<{ id: string; filename: string; contentPreview: string }> | undefined;
+    if (hasFiles && window.geoAgent?.uploadChatAttachment) {
+      try {
+        const assets = await Promise.all(files.map(filePartToKnowledgeAsset));
+        userAttachments = [];
+
+        for (const asset of assets) {
+          const filename = asset.filename || '未命名文件';
+          let content = '';
+
+          // 尝试解码 base64 内容（仅对文本文件有效）
+          try {
+            const base64Data = asset.content_base64 || '';
+            // 移除 data URL 前缀
+            const base64Content = base64Data.replace(/^data:[^;]+;base64,/, '');
+            // 尝试解码（对于二进制文件会失败）
+            const decoded = decodeURIComponent(escape(atob(base64Content)));
+            // 只取前 10000 字符作为内容预览
+            content = decoded.length > 10000 ? decoded.substring(0, 10000) + '...' : decoded;
+          } catch {
+            // 解码失败（二进制文件），使用文件名作为内容
+            content = `[文件: ${filename}]`;
+          }
+
+          // 上传附件到后端持久化存储
+          const result = await window.geoAgent.uploadChatAttachment({
+            projectId: currentEnterprise?.id,
+            filename,
+            mimeType: asset.content_type,
+            content,
+          });
+
+          userAttachments.push({
+            id: result.id,
+            filename: result.filename,
+            contentPreview: result.contentPreview,
+          });
+        }
+      } catch (error) {
+        console.warn('Failed to upload attachments:', error);
+      }
+    }
+
+    const userMessage: ChatMessage = {
+      id: `user-${timestamp}`,
+      role: 'user',
+      content,
+      attachmentIds: userAttachments?.map((att) => att.id),
+    };
     const assistantId = `assistant-${timestamp}`;
     const assistantMessage: ChatMessage = {
       id: assistantId,
@@ -1085,7 +1289,28 @@ export function AgentStudio() {
       let activeProjectId = knowledgeIntent === 'create'
         ? undefined
         : hasEnterprises ? currentEnterprise.id : undefined;
-      if ((hasFiles || isKnowledgeIngestSkill) && knowledgeIntent !== 'chat') {
+
+      // 判断是否应该进入知识库创建/更新流程
+      const shouldEnterKnowledgeFlow = isKnowledgeIngestSkill
+        || (knowledgeIntent === 'create' && hasFiles)
+        || (knowledgeIntent === 'update' && hasFiles)
+        || (hasFiles && knowledgeIntent !== 'chat');
+
+      // 如果用户表明创建知识库意图但没有文件，显示引导信息
+      if ((knowledgeIntent === 'create' || knowledgeIntent === 'update') && !hasFiles) {
+        const guidanceMessage = knowledgeIntent === 'create'
+          ? '好的，我来帮您建立企业知识库。请先上传企业资料文件（如公司介绍、产品服务、用户痛点、信任背书、案例、业务区域、目标关键词等），支持 Word、PDF、Markdown 等格式。上传后我会自动解析并生成知识库草稿。'
+          : '好的，我来帮您更新企业知识库。请先上传需要补充的资料文件，上传后我会自动解析并更新知识库。';
+
+        setMessages((current) => updateMessage(current, assistantId, {
+          content: guidanceMessage,
+          reasoning: '用户表明知识库意图但未上传文件，显示引导信息。',
+          status: 'complete',
+        }));
+        return;
+      }
+
+      if (shouldEnterKnowledgeFlow) {
         if (!window.geoAgent.createKnowledgeDraft && !window.geoAgent.createKnowledgeDraftStream) {
           throw new Error('Knowledge draft API is not available. Please restart Electron and try again.');
         }
@@ -1304,9 +1529,66 @@ export function AgentStudio() {
         projectId: activeProjectId,
         skillId: activeSkill?.id,
       };
+
+      // 如果有附件且是普通聊天，将文件内容摘要包含在消息中
+      let messageToSend = content;
+      if (hasFiles && knowledgeIntent === 'chat') {
+        // 使用已保存的附件信息
+        if (userAttachments && userAttachments.length > 0) {
+          // 从后端获取附件内容（只取摘要）
+          const attachmentContents = await Promise.all(
+            userAttachments.map(async (att) => {
+              try {
+                const attachment = await window.geoAgent?.getChatAttachment?.(att.id);
+                // 使用 content_preview（已截取前 500 字符）
+                return { filename: att.filename, content: attachment?.content_preview || '[文件内容]' };
+              } catch {
+                return { filename: att.filename, content: '[文件内容]' };
+              }
+            })
+          );
+          // 限制每个附件摘要长度
+          const fileContext = attachmentContents
+            .map((att, i) => {
+              const preview = att.content.length > 500 ? att.content.substring(0, 500) + '...' : att.content;
+              return `\n\n[附件 ${i + 1} - ${att.filename}]:\n${preview}`;
+            })
+            .join('');
+          messageToSend = `${content}${fileContext}`;
+        }
+      } else if (!hasFiles && knowledgeIntent === 'chat') {
+        // 没有新文件，但从之前的对话历史中提取文件摘要
+        const previousAttachmentIds = messages
+          .filter((msg) => msg.role === 'user' && msg.attachmentIds && msg.attachmentIds.length > 0)
+          .flatMap((msg) => msg.attachmentIds || []);
+
+        if (previousAttachmentIds.length > 0 && window.geoAgent?.getChatAttachment) {
+          // 只包含最近的附件（避免消息过长）
+          const recentIds = previousAttachmentIds.slice(-3);
+          const attachmentContents = await Promise.all(
+            recentIds.map(async (id) => {
+              try {
+                const attachment = await window.geoAgent?.getChatAttachment?.(id);
+                return { filename: attachment?.filename || '未知文件', content: attachment?.content_preview || '[文件内容]' };
+              } catch {
+                return { filename: '未知文件', content: '[文件内容]' };
+              }
+            })
+          );
+          // 限制每个附件摘要长度
+          const fileContext = attachmentContents
+            .map((att, i) => {
+              const preview = att.content.length > 500 ? att.content.substring(0, 500) + '...' : att.content;
+              return `\n\n[历史附件 ${i + 1} - ${att.filename}]:\n${preview}`;
+            })
+            .join('');
+          messageToSend = `${content}${fileContext}`;
+        }
+      }
+
       if (window.geoAgent.sendChatStream) {
         const finalEvent = await window.geoAgent.sendChatStream(
-          content,
+          messageToSend,
           conversationId,
           options,
           (event) => {
@@ -1317,7 +1599,7 @@ export function AgentStudio() {
             if (event.type === 'status' && event.message) {
               setMessages((current) => updateMessage(current, assistantId, {
                 reasoning: shouldShowReasoning
-                  ? (hasFiles ? `已接收 ${files.length} 个附件，正在解析并写入知识库。${event.message}` : event.message)
+                  ? (hasFiles && knowledgeIntent !== 'chat' ? `已接收 ${files.length} 个附件，正在解析并写入知识库。${event.message}` : event.message)
                   : undefined,
                 status: 'streaming',
               }));
@@ -1349,6 +1631,17 @@ export function AgentStudio() {
               }));
             }
             if (event.type === 'done') {
+              // 生成建议
+              const suggestions = generateSuggestions({
+                hasFiles,
+                knowledgeIntent,
+                messageContent: rawContent,
+                hasEnterprise: hasEnterprises,
+                isKnowledgeSkillSelected: !!selectedSkill,
+                workflowState,
+                geoProject,
+              });
+
               setMessages((current) => updateMessage(current, assistantId, (message) => ({
                 ...message,
                 status: event.error ? 'error' : 'complete',
@@ -1363,12 +1656,13 @@ export function AgentStudio() {
                 provider: event.provider,
                 model: event.model,
                 error: event.error,
-                reasoning: shouldShowReasoning ? `${hasFiles ? `已解析 ${files.length} 个附件并写入企业知识库。` : ''}${buildAssistantReasoning(event.provider, event.model, {
+                reasoning: shouldShowReasoning ? `${hasFiles && knowledgeIntent !== 'chat' ? `已解析 ${files.length} 个附件并写入企业知识库。` : ''}${buildAssistantReasoning(event.provider, event.model, {
                   deepThinking: shouldShowReasoning,
                   webSearch: false,
                   dispatcher: shouldUseDispatcher,
                   error: Boolean(event.error),
                 })}` : undefined,
+                suggestions: suggestions.length > 0 ? suggestions : undefined,
               })));
             }
           }
@@ -1377,10 +1671,10 @@ export function AgentStudio() {
         localStorage.setItem(conversationStorageKey(activeProjectId, finalEvent.conversation_id), finalEvent.conversation_id);
         window.dispatchEvent(new CustomEvent('geo-agent-conversation-changed', { detail: { id: finalEvent.conversation_id } }));
       } else {
-        const response = await window.geoAgent.sendChat(content, conversationId, options);
+        const response = await window.geoAgent.sendChat(messageToSend, conversationId, options);
         setConversationId(response.conversation_id);
         localStorage.setItem(conversationStorageKey(activeProjectId, response.conversation_id), response.conversation_id);
-        const finalReasoning = shouldShowReasoning ? `${hasFiles ? `已解析 ${files.length} 个附件并写入企业知识库。` : ''}${buildAssistantReasoning(response.provider, response.model, {
+        const finalReasoning = shouldShowReasoning ? `${hasFiles && knowledgeIntent !== 'chat' ? `已解析 ${files.length} 个附件并写入企业知识库。` : ''}${buildAssistantReasoning(response.provider, response.model, {
           deepThinking: shouldShowReasoning,
           webSearch: false,
           dispatcher: shouldUseDispatcher,
@@ -1403,8 +1697,21 @@ export function AgentStudio() {
           await typeMessageText(setMessages, assistantId, response.reasoning_content, 'reasoningContent');
         }
         await typeMessageText(setMessages, assistantId, response.content);
+
+        // 生成建议
+        const suggestions = generateSuggestions({
+          hasFiles,
+          knowledgeIntent,
+          messageContent: rawContent,
+          hasEnterprise: hasEnterprises,
+          isKnowledgeSkillSelected: !!selectedSkill,
+          workflowState,
+          geoProject,
+        });
+
         setMessages((current) => updateMessage(current, assistantId, {
           status: response.error ? 'error' : 'complete',
+          suggestions: suggestions.length > 0 ? suggestions : undefined,
         }));
         window.dispatchEvent(new CustomEvent('geo-agent-conversation-changed', { detail: { id: response.conversation_id } }));
       }
@@ -2170,7 +2477,7 @@ export function AgentStudio() {
 
   return (
     <TooltipProvider>
-    <div className="flex h-[calc(100vh-64px)] min-h-0 w-full flex-col overflow-hidden pt-8">
+    <div className="flex h-[calc(100vh-64px)] min-h-0 w-full flex-col overflow-hidden pt-8 relative">
       <Conversation className="min-h-0 w-full">
         <ConversationContent className="mx-auto w-full max-w-4xl gap-8 px-4 pb-8 sm:px-6 md:px-8 lg:px-xl">
           {showEmptyState && (
@@ -2183,8 +2490,8 @@ export function AgentStudio() {
                 <div className="mt-6 flex w-full max-w-2xl items-start gap-3 rounded-2xl border border-secondary/20 bg-secondary/10 px-4 py-3 text-left text-[13px] leading-relaxed text-on-surface-variant">
                   <Info className="mt-0.5 h-4 w-4 shrink-0 text-secondary" />
                   <div>
-                    <span className="font-bold text-primary">开始优化前需要先建立企业知识库。</span>
-                    <span className="ml-1">你可以上传 Word、PDF、Markdown 或直接粘贴企业资料，我会先生成草稿，确认后再正式入库。</span>
+                    <span className="font-bold text-primary">欢迎使用 GEO-Agent 智能助手！</span>
+                    <span className="ml-1">你可以直接与我对话，也可以上传文件进行分析。如果需要建立企业知识库，请告诉我"建立知识库"或选择知识库技能。</span>
                   </div>
                 </div>
               ) : (
@@ -2211,6 +2518,7 @@ export function AgentStudio() {
             <ChatBubble
               key={message.id}
               message={message}
+              setInputValue={setInputValue}
               onConfirmDraft={confirmKnowledgeDraft}
               onConfirmPhaseTwo={confirmPhaseTwo}
               onContinueKnowledgeDraft={continueKnowledgeDraftInput}
@@ -2291,6 +2599,13 @@ export function AgentStudio() {
               <AttachmentButton />
               <PromptInputButton
                 className="size-7 rounded-full text-[#6f6b64] hover:bg-[#eeeeeb] hover:text-[#34322e] dark:text-[#b6b6b6] dark:hover:bg-[#2d2d2d] dark:hover:text-[#f1f1f1]"
+                onClick={() => setIsHistoryOpen(true)}
+                tooltip="对话历史"
+              >
+                <History className="size-3.5 stroke-[2.2]" />
+              </PromptInputButton>
+              <PromptInputButton
+                className="size-7 rounded-full text-[#6f6b64] hover:bg-[#eeeeeb] hover:text-[#34322e] dark:text-[#b6b6b6] dark:hover:bg-[#2d2d2d] dark:hover:text-[#f1f1f1]"
                 onClick={() => {
                   setIsSkillsOpen((current) => !current);
                 }}
@@ -2367,6 +2682,57 @@ export function AgentStudio() {
         </div>
       </div>
     </div>
+
+    {/* 对话历史抽屉 */}
+    <AnimatePresence>
+      {isHistoryOpen && (
+        <>
+          {/* 遮罩层 */}
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/35 z-[9998]"
+            onClick={() => setIsHistoryOpen(false)}
+          />
+          {/* 抽屉面板 */}
+          <motion.div
+            initial={{ x: '-100%' }}
+            animate={{ x: 0 }}
+            exit={{ x: '-100%' }}
+            transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+            className="fixed left-0 top-0 h-full w-[320px] max-w-[85vw] bg-surface-container-low z-[9999] shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+          >
+            <ConversationHistoryPanel
+              conversations={conversationHistory}
+              currentConversationId={conversationId}
+              onSelectConversation={(id) => {
+                openConversation(id);
+                setIsHistoryOpen(false);
+              }}
+              onDeleteConversation={(id) => {
+                if (window.geoAgent?.deleteConversation) {
+                  window.geoAgent.deleteConversation(id).then(() => {
+                    setConversationHistory((prev) => prev.filter((c) => c.id !== id));
+                    if (id === conversationId) {
+                      startNewConversation({ silent: true });
+                    }
+                  });
+                }
+              }}
+              onNewConversation={() => {
+                startNewConversation();
+                setIsHistoryOpen(false);
+              }}
+              onClose={() => setIsHistoryOpen(false)}
+            />
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
+
     {supplementDraftOverlay}
     </TooltipProvider>
   );
@@ -2379,7 +2745,7 @@ const AttachmentButton: React.FC = () => {
     <PromptInputButton
       className="size-7 rounded-full text-[#6f6b64] hover:bg-[#eeeeeb] hover:text-[#34322e] dark:text-[#b6b6b6] dark:hover:bg-[#2d2d2d] dark:hover:text-[#f1f1f1]"
       onClick={attachments.openFileDialog}
-      tooltip="上传知识库附件"
+      tooltip="上传文件附件"
     >
       <Plus className="size-4 stroke-[2.2]" />
     </PromptInputButton>
@@ -2436,6 +2802,7 @@ const AttachmentAwareSubmit: React.FC<{
 
 const ChatBubble: React.FC<{
   message: ChatMessage;
+  setInputValue: (value: string) => void;
   onContinueKnowledgeDraft: (messageId: string, draft: GeoAgentKnowledgeDraft) => void;
   onConfirmDraft: (messageId: string, draft: GeoAgentKnowledgeDraft) => void;
   onConfirmPhaseTwo: (messageId: string, project: GeoAgentGeoProject, platform?: 'doubao' | 'deepseek') => void;
@@ -2445,14 +2812,68 @@ const ChatBubble: React.FC<{
   onRunSourceDiscovery: (messageId: string, report: GeoAgentGeoReport) => void;
   runningStageKeys: Set<string>;
   workflowState: GeoAgentWorkflowState | null;
-}> = ({ message, onContinueKnowledgeDraft, onConfirmDraft, onConfirmPhaseTwo, onConfirmSupportArticles, onRequestSupportArticles, onRunArticleDraft, onRunSourceDiscovery, runningStageKeys, workflowState }) => {
+}> = ({ message, setInputValue, onContinueKnowledgeDraft, onConfirmDraft, onConfirmPhaseTwo, onConfirmSupportArticles, onRequestSupportArticles, onRunArticleDraft, onRunSourceDiscovery, runningStageKeys, workflowState }) => {
   const nextAction = getNextWorkflowAction(workflowState, message, runningStageKeys);
   if (message.role === 'user') {
+    // 检查消息是否包含附件信息
+    const hasAttachmentInfo = message.content.includes('[附件') || message.content.includes('[历史附件');
+
+    // 提取附件文件名
+    const attachmentFiles: string[] = [];
+    const currentAttachments = message.content.match(/\[附件 \d+ - ([^\]]+)\]/g);
+    if (currentAttachments) {
+      currentAttachments.forEach((match) => {
+        const filename = match.match(/\[附件 \d+ - ([^\]]+)\]/)?.[1];
+        if (filename) attachmentFiles.push(filename);
+      });
+    }
+    const historyAttachments = message.content.match(/\[历史附件 \d+ - ([^\]]+)\]/g);
+    if (historyAttachments) {
+      historyAttachments.forEach((match) => {
+        const filename = match.match(/\[历史附件 \d+ - ([^\]]+)\]/)?.[1];
+        if (filename) attachmentFiles.push(filename);
+      });
+    }
+
+    // 提取纯文本内容（移除附件信息）
+    const displayContent = hasAttachmentInfo
+      ? message.content.split('\n\n[附件')[0].split('\n\n[历史附件')[0]
+      : message.content;
+
+    const getFileIcon = (filename: string) => {
+      const isPdf = filename.toLowerCase().endsWith('.pdf');
+      const isDoc = filename.toLowerCase().endsWith('.doc') || filename.toLowerCase().endsWith('.docx');
+      const isTxt = filename.toLowerCase().endsWith('.txt');
+      if (isPdf) return <FileText className="w-4 h-4 text-red-500" />;
+      if (isDoc) return <FileText className="w-4 h-4 text-blue-500" />;
+      if (isTxt) return <FileText className="w-4 h-4 text-gray-500" />;
+      return <FileText className="w-4 h-4 text-secondary" />;
+    };
+
     return (
       <Message from="user" className="max-w-[78%] items-end">
-        <MessageContent className="!rounded-[999px] !bg-[#eeeeec] !px-5 !py-2.5 text-[15px] leading-relaxed !text-[#2f2f2f] shadow-none dark:!bg-[#2d2d2d] dark:!text-[#f1f1f1]">
-          {message.content}
-        </MessageContent>
+        <div className="flex flex-col items-end gap-2">
+          {/* 附件显示在上方 */}
+          {attachmentFiles.length > 0 && (
+            <div className="flex flex-wrap justify-end gap-2">
+              {attachmentFiles.map((filename, index) => (
+                <div
+                  key={index}
+                  className="inline-flex items-center gap-2 rounded-2xl bg-white px-4 py-2 text-[13px] text-[#504a43] shadow-sm ring-1 ring-[#e0ddd8] dark:bg-[#2a2a2a] dark:text-[#d8d8d8] dark:ring-[#444]"
+                >
+                  {getFileIcon(filename)}
+                  <span className="max-w-[180px] truncate font-medium">{filename}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {/* 用户提示词显示在下方 */}
+          {displayContent && (
+            <MessageContent className="!rounded-[999px] !bg-[#eeeeec] !px-5 !py-2.5 text-[15px] leading-relaxed !text-[#2f2f2f] shadow-none dark:!bg-[#2d2d2d] dark:!text-[#f1f1f1]">
+              {displayContent}
+            </MessageContent>
+          )}
+        </div>
       </Message>
     );
   }
@@ -2560,6 +2981,24 @@ const ChatBubble: React.FC<{
           message.content || message.phaseTwoExecution || message.sourceDiscoveryExecution || message.articleDraftExecution
             ? <StreamingTailIndicator label={message.reasoning ?? '正在等待模型继续输出'} />
             : <ThinkingIndicator label={message.reasoning ?? '正在思考'} />
+        )}
+        {message.suggestions && message.suggestions.length > 0 && message.status === 'complete' && (
+          <Suggestions className="mt-4">
+            {message.suggestions.map((suggestion) => (
+              <Suggestion
+                key={suggestion.label}
+                suggestion={suggestion.value}
+                onClick={(value) => {
+                  if (value) {
+                    setInputValue(value);
+                  }
+                }}
+              >
+                {suggestion.icon && <suggestion.icon className="size-4 shrink-0" />}
+                <span>{suggestion.label}</span>
+              </Suggestion>
+            ))}
+          </Suggestions>
         )}
       </MessageContent>
       {message.knowledgeDraft && message.confirmationState === 'approval-requested' && isConfirmableKnowledgeDraft(message.knowledgeDraft) && (

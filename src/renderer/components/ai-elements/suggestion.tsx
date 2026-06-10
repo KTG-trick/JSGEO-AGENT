@@ -44,11 +44,21 @@ export const Suggestion = ({
 
   return (
     <Button
-      className={cn("cursor-pointer rounded-full px-4", className)}
+      className={cn(
+        "cursor-pointer rounded-full px-4 py-2 h-auto min-h-[36px]",
+        "inline-flex items-center justify-center gap-2",
+        "text-sm font-medium",
+        "border border-[#d4d0c9] bg-white text-[#3d3a35]",
+        "hover:bg-[#f5f3ef] hover:border-[#c4c0b9]",
+        "dark:border-[#444] dark:bg-[#2a2a2a] dark:text-[#e0e0e0]",
+        "dark:hover:bg-[#333] dark:hover:border-[#555]",
+        "transition-colors duration-150",
+        className
+      )}
       onClick={handleClick}
       size={size}
       type="button"
-      variant={variant}
+      variant="ghost"
       {...props}
     >
       {children || suggestion}

@@ -885,6 +885,51 @@ declare global {
       ) => Promise<{ updated: boolean; conversation: GeoAgentConversationSummary | null }>;
       deleteConversation: (conversationId: string) => Promise<{ ok: boolean }>;
       clearConversationHistory: (payload: { projectId?: string | null; scope?: 'project' | 'all' }) => Promise<{ ok: boolean; scope?: string; project_id?: string }>;
+      // 附件管理
+      uploadChatAttachment: (payload: {
+        projectId?: string | null;
+        conversationId?: string | null;
+        messageId?: string | null;
+        filename: string;
+        mimeType?: string | null;
+        content: string;
+      }) => Promise<{
+        id: string;
+        filename: string;
+        mimeType: string | null;
+        fileSize: number;
+        contentPreview: string;
+      }>;
+      getChatAttachment: (attachmentId: string) => Promise<{
+        id: string;
+        project_id: string | null;
+        conversation_id: string | null;
+        message_id: string | null;
+        filename: string;
+        mime_type: string | null;
+        file_size: number;
+        content: string | null;
+        content_preview: string | null;
+        created_at: string;
+      } | null>;
+      getChatAttachmentContent: (attachmentId: string) => Promise<string | null>;
+      getAttachmentsForMessage: (messageId: string) => Promise<Array<{
+        id: string;
+        filename: string;
+        mime_type: string | null;
+        file_size: number;
+        content_preview: string | null;
+        created_at: string;
+      }>>;
+      getAttachmentsForConversation: (conversationId: string) => Promise<Array<{
+        id: string;
+        filename: string;
+        mime_type: string | null;
+        file_size: number;
+        content_preview: string | null;
+        created_at: string;
+      }>>;
+      deleteChatAttachment: (attachmentId: string) => Promise<boolean>;
       getKnowledgeEntries: (projectId?: string | null, limit?: number) => Promise<GeoAgentKnowledgeEntriesResponse>;
       createKnowledgeEntry: (entry: {
         content: string;

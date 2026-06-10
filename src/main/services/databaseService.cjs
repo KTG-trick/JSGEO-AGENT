@@ -184,6 +184,28 @@ function createSchema(database) {
     CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
       ON messages(conversation_id, created_at);
 
+    CREATE TABLE IF NOT EXISTS chat_attachments (
+      id TEXT PRIMARY KEY,
+      project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+      conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+      message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+      filename TEXT NOT NULL,
+      mime_type TEXT,
+      file_size INTEGER DEFAULT 0,
+      content TEXT,
+      content_preview TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_chat_attachments_conversation
+      ON chat_attachments(conversation_id, created_at);
+
+    CREATE INDEX IF NOT EXISTS idx_chat_attachments_message
+      ON chat_attachments(message_id);
+
+    CREATE INDEX IF NOT EXISTS idx_chat_attachments_project
+      ON chat_attachments(project_id, created_at);
+
     CREATE TABLE IF NOT EXISTS workflow_events (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -515,6 +537,18 @@ function migrateSchema(database) {
     )
     WHERE last_message_preview IS NULL;
   `);
+
+  // P3: 为 messages 表添加 token_count 和 content_type 字段
+  const msgTableColumns = database.prepare('PRAGMA table_info(messages)').all();
+  const msgTableColumnNames = new Set(msgTableColumns.map((col) => col.name));
+
+  if (!msgTableColumnNames.has('token_count')) {
+    database.exec('ALTER TABLE messages ADD COLUMN token_count INTEGER DEFAULT 0');
+  }
+
+  if (!msgTableColumnNames.has('content_type')) {
+    database.exec("ALTER TABLE messages ADD COLUMN content_type TEXT DEFAULT 'text'");
+  }
 }
 
 module.exports = {
