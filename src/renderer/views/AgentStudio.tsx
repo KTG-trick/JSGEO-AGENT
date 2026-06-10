@@ -3048,14 +3048,12 @@ const ChatBubble: React.FC<{
         <AssistantConfirmationBar
           approved={message.confirmationApproved}
           id={message.supportArticlesPrompt.id}
-          onCancel={() => onConfirmSupportArticles(message.id, message.supportArticlesPrompt!)}
           onConfirm={() => onConfirmSupportArticles(message.id, message.supportArticlesPrompt!)}
           state={message.confirmationState ?? 'approval-requested'}
           title={message.supportArticles
             ? `重新生成${platformLabelFor(message.supportArticlesPrompt.platform === 'deepseek' ? 'deepseek' : 'doubao')}阶段四内容资产，会重新生成首轮支撑文章和排行榜文章草稿。`
             : `生成${platformLabelFor(message.supportArticlesPrompt.platform === 'deepseek' ? 'deepseek' : 'doubao')}阶段四内容资产，会生成首轮支撑文章和排行榜文章草稿。`}
           confirmLabel={message.supportArticles ? '重新生成内容资产' : '生成内容资产'}
-          cancelLabel={message.supportArticles ? '取消' : '重新生成内容资产'}
           busy={message.actionBusy}
         />
       )}

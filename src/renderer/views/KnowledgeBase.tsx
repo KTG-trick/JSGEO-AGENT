@@ -1761,6 +1761,7 @@ function buildKnowledgeHealthReport(
       reason: '企业实体、行业、业务和区域是 GEO 召回的基础锚点。',
       missingItems: missingLabels(profileData, [
         ['company_name', '公司名称'],
+        ['short_name', '品牌/公司简称'],
         ['industry_category', '所属行业分类'],
         ['detailed_address', '详细经营地址'],
         ['business_regions', '业务区域'],
@@ -1811,15 +1812,14 @@ function buildKnowledgeHealthReport(
     }),
     makeDimension({
       key: 'keywords',
-      label: '关键词与长尾词覆盖',
-      score: Math.min(100, (keywordCount(profileFieldText(profileData, 'target_keywords')) >= 3 ? 70 : keywordCount(profileFieldText(profileData, 'target_keywords')) * 25) + (hasText(profileData.generated_long_tail_keywords) ? 30 : 0)),
+      label: '关键词覆盖',
+      score: keywordCount(profileFieldText(profileData, 'target_keywords')) >= 3 ? 70 : keywordCount(profileFieldText(profileData, 'target_keywords')) * 25,
       weight: 0.14,
-      reason: '目标关键词和长尾问题决定阶段二自查与阶段五内容矩阵方向。',
+      reason: '目标关键词决定阶段二自查与阶段五内容矩阵方向。',
       missingItems: [
         ...(keywordCount(profileFieldText(profileData, 'target_keywords')) > 0 ? [] : ['目标关键词']),
-        ...(hasText(profileData.generated_long_tail_keywords) ? [] : ['长尾语义词']),
       ],
-      recommendedAction: '补充地区 + 行业 + 主体关键词，并生成长尾用户问题。',
+      recommendedAction: '补充地区 + 行业 + 主体关键词。',
     }),
     makeDimension({
       key: 'rag',
