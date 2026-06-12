@@ -284,9 +284,19 @@ export function Drafts() {
     setAutoPublishResult(null);
     setError(null);
     try {
+      // 从设置中读取价格上限
+      let maxPrice = 10;
+      try {
+        const settings = await window.geoAgent?.getSettings?.();
+        if (settings?.AUTO_PUBLISH_MAX_PRICE) {
+          maxPrice = Number(settings.AUTO_PUBLISH_MAX_PRICE) || 10;
+        }
+      } catch { /* 忽略设置读取失败 */ }
+
       const result = await window.geoAgent.autoPublishArticles(currentEnterpriseId, {
         articleRole: role,
         maxArticles: 50,
+        maxPrice,
       });
       setAutoPublishResult(result);
       await loadDrafts();

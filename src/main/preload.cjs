@@ -38,6 +38,8 @@ contextBridge.exposeInMainWorld('geoAgent', {
   },
   healthCheck: () => ipcRenderer.invoke('geo-agent:health-check'),
   getConfigStatus: () => ipcRenderer.invoke('geo-agent:get-config-status'),
+  getSettings: () => ipcRenderer.invoke('geo-agent:get-settings'),
+  saveSettings: (settings) => ipcRenderer.invoke('geo-agent:save-settings', settings),
   sendChatStream: (message, conversationId, selectedModelOrOptions = null, optionsOrEvent = {}, maybeOnEvent) => {
     const legacySignature = typeof maybeOnEvent === 'function';
     const selectedModel = legacySignature ? selectedModelOrOptions : null;

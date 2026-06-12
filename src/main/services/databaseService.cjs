@@ -375,6 +375,12 @@ function createSchema(database) {
 
     CREATE INDEX IF NOT EXISTS idx_evolution_rules_project_status
       ON evolution_rules(project_id, status, created_at);
+
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
   migrateSchema(database);
 }

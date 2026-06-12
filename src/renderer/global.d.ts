@@ -622,6 +622,8 @@ declare global {
           }
         >;
       }>;
+      getSettings: () => Promise<Record<string, string>>;
+      saveSettings: (settings: Record<string, string>) => Promise<{ ok: boolean }>;
       sendChat: (
         message: string,
         conversationId?: string | null,
@@ -846,6 +848,7 @@ declare global {
       autoPublishArticles: (projectId: string, options?: {
         articleRole?: 'support' | 'ranking';
         maxArticles?: number;
+        maxPrice?: number;
         dryRun?: boolean;
       }) => Promise<{
         projectId: string;

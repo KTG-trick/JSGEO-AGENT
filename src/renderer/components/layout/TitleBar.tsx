@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Settings, Sun, Moon, Bell, Globe, Building2, ChevronDown } from 'lucide-react';
 import { useEnterprise } from '../../context/EnterpriseContext';
 import { cn } from '../../lib/utils';
+import { SettingsModal } from '../SettingsModal';
 
 export function TitleBar() {
   const [isMaximized, setIsMaximized] = useState(false);
@@ -19,6 +20,7 @@ export function TitleBar() {
   });
   const { currentEnterpriseId, currentEnterprise, setEnterpriseId, enterprises, isLoadingEnterprises } = useEnterprise();
   const [isEnterpriseOpen, setIsEnterpriseOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -201,10 +203,12 @@ export function TitleBar() {
         <button
           className="h-7 w-7 flex items-center justify-center rounded text-on-surface hover:text-primary hover:bg-surface-container-low transition-colors mr-1"
           title="Settings"
+          onClick={() => setIsSettingsOpen(true)}
         >
           <Settings className="w-[18px] h-[18px]" />
         </button>
       </div>
+      <SettingsModal open={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
     </div>
   );
 }

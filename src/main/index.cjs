@@ -105,6 +105,37 @@ function loadEnvFile() {
     });
 }
 
+function updateEnvFile(updates) {
+  const envPath = path.join(rootDir, '.env');
+  let lines = [];
+  if (fs.existsSync(envPath)) {
+    lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+  }
+
+  const updatedKeys = new Set();
+  const newLines = lines.map((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) return line;
+    const separator = trimmed.indexOf('=');
+    if (separator <= 0) return line;
+    const key = trimmed.slice(0, separator).trim();
+    if (key in updates) {
+      updatedKeys.add(key);
+      return `${key}=${updates[key]}`;
+    }
+    return line;
+  });
+
+  // 追加尚未存在的 key
+  for (const [key, value] of Object.entries(updates)) {
+    if (!updatedKeys.has(key)) {
+      newLines.push(`${key}=${value}`);
+    }
+  }
+
+  fs.writeFileSync(envPath, newLines.join('\n'), 'utf8');
+}
+
 function emptyIndexStatus(projectId = null) {
   return {
     project_id: projectId,
@@ -452,6 +483,40 @@ function registerHandlers() {
   ipcMain.handle('geo-agent:window-is-maximized', () => mainWindow?.isMaximized());
 
   ipcMain.handle('geo-agent:get-config-status', async () => getConfigStatus());
+
+  ipcMain.handle('geo-agent:get-settings', async () => {
+    const rows = getDb().prepare('SELECT key, value FROM app_settings').all();
+    const settings = {};
+    for (const row of rows) {
+      settings[row.key] = row.value;
+    }
+    return settings;
+  });
+
+  ipcMain.handle('geo-agent:save-settings', async (_event, settings) => {
+    const upsert = getDb().prepare(
+      'INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+    );
+    const timestamp = new Date().toISOString();
+    const envUpdates = {};
+    const saveMany = getDb().transaction((entries) => {
+      for (const [key, value] of entries) {
+        upsert.run(key, String(value), timestamp);
+        envUpdates[key] = String(value);
+      }
+    });
+    saveMany(Object.entries(settings));
+
+    // 运行时更新 process.env
+    for (const [key, value] of Object.entries(envUpdates)) {
+      process.env[key] = value;
+    }
+
+    // 持久化到 .env 文件
+    updateEnvFile(envUpdates);
+
+    return { ok: true };
+  });
 
   ipcMain.handle('geo-agent:get-skills', async () => ({
     skills: skillService.getUserSkills(),

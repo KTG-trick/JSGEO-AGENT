@@ -331,6 +331,40 @@ function listResources(filters = {}) {
   return rows.map(rowToResource);
 }
 
+/**
+ * 多字段搜索资源（名称 + 备注）
+ */
+function searchResources(filters = {}) {
+  const db = getDb();
+  const clauses = ['provider = ?'];
+  const params = [PROVIDER];
+  const resourceType = normalizeResourceType(filters.resourceType || filters.resource_type || 'media');
+  clauses.push('resource_type = ?');
+  params.push(resourceType);
+  if (filters.status !== undefined && filters.status !== null && filters.status !== '') {
+    clauses.push('status = ?');
+    params.push(Number(filters.status));
+  }
+  if (filters.query) {
+    const q = `%${text(filters.query)}%`;
+    clauses.push('(name LIKE ? OR raw_json LIKE ?)');
+    params.push(q, q);
+  }
+  if (filters.maxPrice !== undefined && filters.maxPrice !== null && filters.maxPrice !== '') {
+    clauses.push('price <= ?');
+    params.push(Number(filters.maxPrice));
+  }
+  const limit = Math.max(1, Math.min(Number(filters.limit || 100), 500));
+  const rows = db.prepare(`
+    SELECT *
+    FROM publish_resources
+    WHERE ${clauses.join(' AND ')}
+    ORDER BY status ASC, price ASC, resource_id ASC
+    LIMIT ?
+  `).all(...params, limit);
+  return rows.map(rowToResource);
+}
+
 function rowToOrder(row) {
   const order = {
     id: row.id,
@@ -606,6 +640,7 @@ module.exports = {
   mapOrderStatus,
   queryResources,
   request,
+  searchResources,
   signPayload,
   syncOrderByArticle,
   syncOrdersByProject,
