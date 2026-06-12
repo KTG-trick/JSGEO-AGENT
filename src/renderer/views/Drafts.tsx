@@ -6,6 +6,7 @@ import { useEnterprise } from '../context/EnterpriseContext';
 import { PreviewDialog } from '../components/PreviewDialog';
 import { showConfirm } from '../components/ConfirmDialog';
 import { showInputDialog } from '../components/InputDialog';
+import * as orderRules from '../../shared/chaojimeijieOrderRules';
 
 type StatusFilter = 'all' | 'draft' | 'reviewed' | 'publishing' | 'published' | 'failed';
 type RoleFilter = 'all' | 'support' | 'ranking';
@@ -79,6 +80,7 @@ export function Drafts() {
   const [isAutoPublishing, setIsAutoPublishing] = useState(false);
   const [autoPublishResult, setAutoPublishResult] = useState<{
     total: number;
+    submitted?: number;
     published: number;
     skipped: number;
     failed: number;
@@ -223,7 +225,7 @@ export function Drafts() {
     if (!confirmed) return;
     setError(null);
     try {
-      // 同步删除OSS预览文件
+      // 同步删除在线预览文件
       if (window.geoAgent?.deleteArticleOssPreview && publication(draft).preview_object_key) {
         await window.geoAgent.deleteArticleOssPreview(draft.id).catch(() => {});
       }
@@ -246,8 +248,11 @@ export function Drafts() {
     setIsSyncingOrders(true);
     setError(null);
     try {
-      await window.geoAgent.syncPublishOrders(currentEnterpriseId);
+      const result = await window.geoAgent.syncPublishOrders(currentEnterpriseId);
       await loadDrafts();
+      if (result.errors?.length) {
+        setError(`部分订单同步失败：${result.errors.slice(0, 3).map((item) => item.message).join('；')}`);
+      }
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : String(actionError));
     } finally {
@@ -270,7 +275,7 @@ export function Drafts() {
 
     const confirmed = await showConfirm({
       title: `确认自动发稿`,
-      message: `将自动发布 ${draftCount} 篇${role === 'ranking' ? '排行榜' : '支撑'}稿件，系统会自动选择最佳媒体资源。确认继续？`,
+      message: `将自动提交 ${draftCount} 篇${role === 'ranking' ? '排行榜' : '支撑'}稿件到超级媒介，系统会自动选择最佳媒体资源。确认继续？`,
       variant: 'info',
     });
     if (!confirmed) return;
@@ -314,7 +319,7 @@ export function Drafts() {
         <div>
           <h2 className="font-heading text-[28px] font-bold tracking-tight text-primary">稿件管理与发布</h2>
           <p className="mt-2 max-w-3xl text-[13px] leading-relaxed text-on-surface-variant">
-            当前企业：{currentEnterprise?.name || '未命名企业'}。这里管理阶段四生成的稿件，支持校对、OSS 预览、媒体投递和订单同步。
+            当前企业：{currentEnterprise?.name || '未命名企业'}。这里管理阶段四生成的稿件，支持校对、在线预览、媒体投递和订单同步。
           </p>
         </div>
         <div className="grid grid-cols-3 gap-2 text-center text-[11px] font-bold text-on-surface-variant">
@@ -396,7 +401,7 @@ export function Drafts() {
           <div className="mb-3 flex items-center justify-between">
             <div className="flex items-center gap-2 font-bold text-primary">
               <CheckCircle2 className="size-4 text-emerald-500" />
-              自动发稿结果
+              自动提交结果
             </div>
             <button
               className="rounded-md px-2 py-1 text-[11px] font-bold text-on-surface-variant transition-colors hover:bg-surface-container"
@@ -413,8 +418,8 @@ export function Drafts() {
               <div className="text-[11px] text-on-surface-variant">总计</div>
             </div>
             <div className="rounded-md bg-emerald-50 p-2 text-center dark:bg-emerald-950/20">
-              <div className="text-[18px] font-bold text-emerald-600 dark:text-emerald-400">{autoPublishResult.published}</div>
-              <div className="text-[11px] text-emerald-600/70 dark:text-emerald-400/70">成功</div>
+              <div className="text-[18px] font-bold text-emerald-600 dark:text-emerald-400">{autoPublishResult.submitted ?? autoPublishResult.published}</div>
+              <div className="text-[11px] text-emerald-600/70 dark:text-emerald-400/70">已提交</div>
             </div>
             <div className="rounded-md bg-amber-50 p-2 text-center dark:bg-amber-950/20">
               <div className="text-[18px] font-bold text-amber-600 dark:text-amber-400">{autoPublishResult.skipped}</div>
@@ -433,6 +438,7 @@ export function Drafts() {
                   key={result.draftId}
                   className={cn(
                     'flex items-center justify-between gap-3 px-3 py-2 border-b border-outline-variant/30 last:border-0 text-[12px]',
+                    result.status === 'publishing' && 'text-emerald-600 dark:text-emerald-400',
                     result.status === 'published' && 'text-emerald-600 dark:text-emerald-400',
                     result.status === 'skipped' && 'text-amber-600 dark:text-amber-400',
                     result.status === 'failed' && 'text-red-600 dark:text-red-400'
@@ -440,6 +446,7 @@ export function Drafts() {
                 >
                   <span className="flex-1 truncate">{result.title || result.draftId.slice(0, 8)}</span>
                   <span className="whitespace-nowrap text-[11px]">
+                    {result.status === 'publishing' && `已提交 → ${result.resource?.name}`}
                     {result.status === 'published' && `已发布 → ${result.resource?.name}`}
                     {result.status === 'skipped' && `跳过: ${result.reason}`}
                     {result.status === 'failed' && `失败: ${result.error}`}
@@ -494,7 +501,11 @@ export function Drafts() {
                   onRemove={() => removeDraft(draft)}
                   onSyncOrder={() => syncOrder(draft)}
                   onManageOrder={(action) => manageOrder(draft, action)}
-                  onPreview={() => setPreviewDraft(draft)}
+                  onPreview={() => {
+                    const url = draft.draft?.publication_evidence?.preview_url;
+                    if (url) console.log('[在线预览]', url);
+                    setPreviewDraft(draft);
+                  }}
                 />
               ))}
             </tbody>
@@ -605,8 +616,11 @@ const DraftRow: React.FC<DraftRowProps> = ({ draft, rankingReady, onAiEdit, onEd
   const publishedUrl = text(evidence.published_url);
   const previewUrl = text(evidence.preview_url);
   const order = draft.publish_order;
-  const publishDisabled = role === 'ranking' && !rankingReady;
+  const orderBlocksPublish = order ? orderRules.isOrderBlockingRepublish(order) : false;
+  const publishDisabled = (role === 'ranking' && !rankingReady) || orderBlocksPublish;
+  const publishTitle = orderBlocksPublish ? '当前稿件已有未完成或已发布订单' : publishDisabled ? '请先校对 6 篇支撑稿' : '选择媒体并投递';
   const lockedByPublish = ['publishing', 'published'].includes(status);
+  const canManage = (action: PublishOrderAction) => order ? orderRules.canManageOrder(order, action, order.resource).allowed : false;
   return (
     <tr className="border-t border-outline-variant/50 transition-colors hover:bg-surface-container/40">
       <td className="px-5 py-4 align-top">
@@ -643,12 +657,12 @@ const DraftRow: React.FC<DraftRowProps> = ({ draft, rankingReady, onAiEdit, onEd
             onClick={onPreview}
           >
             <ExternalLink className="size-3" />
-            OSS 预览
+            在线预览
           </button>
         ) : (
-          <span>{order ? `超级媒介订单：${order.partner_sn}` : '校对后生成 OSS 预览'}</span>
+          <span>{order ? `超级媒介订单：${order.partner_sn}` : '校对后生成在线预览页'}</span>
         )}
-        {order?.status_code ? <div className="mt-1 text-[11px]">订单状态：{order.status_code}</div> : null}
+        {order?.status_code ? <div className="mt-1 text-[11px]">订单状态：{orderRules.statusLabel(order.status_code)}（{order.status_code}）</div> : null}
         {order && !publishedUrl ? <div className="mt-1 text-[11px]">订单：{order.partner_sn}</div> : null}
       </td>
       <td className="px-5 py-4 align-top">
@@ -661,29 +675,35 @@ const DraftRow: React.FC<DraftRowProps> = ({ draft, rankingReady, onAiEdit, onEd
             <CheckCircle2 className="size-4" />
           </IconButton>
           {order && (
-            <IconButton title="同步超级媒介订单" onClick={onSyncOrder} disabled={lockedByPublish}>
+            <IconButton title="同步超级媒介订单" onClick={onSyncOrder}>
               <RefreshCw className="size-4" />
             </IconButton>
           )}
-          {order && status !== 'published' && (
+          {order && (
             <>
+              {canManage('urge') && (
               <IconButton title="催稿" onClick={() => onManageOrder('urge')}>
                 <Bell className="size-4" />
               </IconButton>
+              )}
+              {canManage('cancel') && (
               <IconButton title="取消订单" onClick={() => onManageOrder('cancel')}>
                 <Ban className="size-4" />
               </IconButton>
+              )}
+              {canManage('apply-refund') && (
               <IconButton title="申请退款" onClick={() => onManageOrder('apply-refund')}>
                 <CircleDollarSign className="size-4" />
               </IconButton>
-              {order.resource_type === 'media' && (
+              )}
+              {canManage('apply-republish') && (
                 <IconButton title="申请补发" onClick={() => onManageOrder('apply-republish')}>
                   <RotateCcw className="size-4" />
                 </IconButton>
               )}
             </>
           )}
-          <IconButton title={publishDisabled ? '请先校对 6 篇支撑稿' : '选择媒体并投递'} onClick={onPublish} disabled={publishDisabled || status === 'published'}>
+          <IconButton title={publishTitle} onClick={onPublish} disabled={publishDisabled || status === 'published'}>
             <Send className="size-4" />
           </IconButton>
           <IconButton title="移除草稿" onClick={onRemove} disabled={lockedByPublish}>
@@ -963,7 +983,7 @@ function PublishResourceModal({ draft, onClose, onSaved }: { draft: GeoAgentGeoA
     <Modal title="选择超级媒介资源并投递" onClose={onClose}>
       <div className="space-y-4">
         <div className="rounded-md bg-surface-container/70 p-3 text-[12px] leading-relaxed text-on-surface-variant">
-          下单前会把稿件上传到 OSS 生成公网预览 URL，再提交给超级媒介。
+          超级媒介接口要求提交公网预览 URL，不支持正文直传。下单前会生成并校验在线预览页，确认可读取后再提交。
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Segmented

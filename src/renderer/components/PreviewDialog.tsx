@@ -8,10 +8,18 @@ interface PreviewDialogProps {
   onClose: () => void;
 }
 
+function isDarkMode() {
+  return document.documentElement.classList.contains('dark');
+}
+
+const LIGHT = { bg: '#fff', text: '#202020', border: '#e0e0e0', muted: '#666', hover: '#f0f0f0' };
+const DARK = { bg: '#1e1e1e', text: '#e0e0e0', border: '#333', muted: '#999', hover: '#2a2a2a' };
+
 export function PreviewDialog({ articleId, open, onClose }: PreviewDialogProps) {
   const [html, setHtml] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [dark, setDark] = useState(isDarkMode);
 
   useEffect(() => {
     if (!open || !articleId) return;
@@ -30,6 +38,15 @@ export function PreviewDialog({ articleId, open, onClose }: PreviewDialogProps) 
       });
   }, [open, articleId]);
 
+  // 监听主题切换
+  useEffect(() => {
+    if (!open) return;
+    setDark(isDarkMode());
+    const observer = new MutationObserver(() => setDark(isDarkMode()));
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+    return () => observer.disconnect();
+  }, [open]);
+
   // ESC 键关闭
   useEffect(() => {
     if (!open) return;
@@ -42,14 +59,19 @@ export function PreviewDialog({ articleId, open, onClose }: PreviewDialogProps) 
 
   if (!open) return null;
 
+  const c = dark ? DARK : LIGHT;
+
   const dialog = (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50">
-      <div className="relative flex h-[75vh] w-[70vw] max-w-[900px] flex-col rounded-2xl bg-white shadow-xl overflow-hidden">
-        <div className="flex items-center justify-between border-b border-outline-variant/50 px-6 py-4">
-          <h3 className="flex-1 text-center text-xl font-bold tracking-tight text-on-surface">稿件预览</h3>
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.5)' }}>
+      <div className="relative flex h-[75vh] w-[70vw] max-w-[900px] flex-col rounded-2xl shadow-xl overflow-hidden" style={{ background: c.bg, color: c.text }}>
+        <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: `1px solid ${c.border}` }}>
+          <h3 className="flex-1 text-center text-xl font-bold tracking-tight" style={{ color: c.text }}>稿件预览</h3>
           <button
             onClick={onClose}
-            className="absolute right-4 rounded-md p-1.5 text-on-surface-variant hover:bg-surface-container transition-colors"
+            className="absolute right-4 rounded-md p-1.5 transition-colors"
+            style={{ color: c.muted }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = c.hover; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
           >
             <X className="size-5" />
           </button>
@@ -57,12 +79,12 @@ export function PreviewDialog({ articleId, open, onClose }: PreviewDialogProps) 
         <div className="flex-1 overflow-auto">
           {loading && (
             <div className="flex h-full items-center justify-center">
-              <div className="text-on-surface-variant">加载中...</div>
+              <div style={{ color: c.muted }}>加载中...</div>
             </div>
           )}
           {error && (
             <div className="flex h-full items-center justify-center">
-              <div className="text-error">{error}</div>
+              <div style={{ color: '#d32f2f' }}>{error}</div>
             </div>
           )}
           {!loading && !error && html && (

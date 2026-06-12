@@ -1,23 +1,10 @@
 const crypto = require('node:crypto');
 const { getDb } = require('./databaseService.cjs');
 const { fetchWithRetry, sanitizeErrorMessage } = require('./apiClient.cjs');
+const orderRules = require('../../shared/chaojimeijieOrderRules.cjs');
 
 const PROVIDER = 'chaojimeijie';
 const API_BASE_URL = 'https://vip.chaojimeijie.com/api';
-const ORDER_STATUS_MAP = {
-  1: 'publishing',
-  2: 'failed',
-  3: 'publishing',
-  4: 'published',
-  5: 'failed',
-  6: 'failed',
-  7: 'failed',
-  8: 'failed',
-  9: 'failed',
-  10: 'publishing',
-  11: 'published',
-  12: 'published',
-};
 
 function nowIso() {
   return new Date().toISOString();
@@ -140,10 +127,11 @@ function encodeQuery(params) {
   Object.entries(params)
     .filter(([, value]) => value !== undefined && value !== null)
     .forEach(([key, value]) => {
+      const encodedKey = encodeURIComponent(key).replace(/%5B%5D/g, '[]');
       if (Array.isArray(value)) {
-        value.forEach((item) => parts.push(`${key}[]=${item}`));
+        value.forEach((item) => parts.push(`${encodedKey}[]=${encodeURIComponent(String(item ?? ''))}`));
       } else {
-        parts.push(`${key}=${value}`);
+        parts.push(`${encodedKey}=${encodeURIComponent(String(value ?? ''))}`);
       }
     });
   return parts.join('&');
@@ -156,10 +144,11 @@ function encodeBody(params) {
   Object.entries(params)
     .filter(([, value]) => value !== undefined && value !== null)
     .forEach(([key, value]) => {
+      const encodedKey = encodeURIComponent(key).replace(/%5B%5D/g, '[]');
       if (Array.isArray(value)) {
-        value.forEach((item) => parts.push(`${key}[]=${item}`));
+        value.forEach((item) => parts.push(`${encodedKey}[]=${encodeURIComponent(String(item ?? ''))}`));
       } else {
-        parts.push(`${key}=${value}`);
+        parts.push(`${encodedKey}=${encodeURIComponent(String(value ?? ''))}`);
       }
     });
   return parts.join('&');
@@ -222,6 +211,17 @@ function rowToResource(row) {
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
+}
+
+function getResourceForOrder(order) {
+  if (!order?.resource_id) return null;
+  const row = getDb().prepare(`
+    SELECT *
+    FROM publish_resources
+    WHERE provider = ? AND resource_type = ? AND resource_id = ?
+    LIMIT 1
+  `).get(PROVIDER, normalizeResourceType(order.resource_type), Number(order.resource_id));
+  return row ? rowToResource(row) : null;
 }
 
 function saveResources(resourceType, items = []) {
@@ -332,7 +332,7 @@ function listResources(filters = {}) {
 }
 
 function rowToOrder(row) {
-  return {
+  const order = {
     id: row.id,
     article_id: row.article_id,
     project_id: row.project_id,
@@ -349,6 +349,10 @@ function rowToOrder(row) {
     last_synced_at: row.last_synced_at,
     created_at: row.created_at,
     updated_at: row.updated_at,
+  };
+  return {
+    ...order,
+    resource: getResourceForOrder(order),
   };
 }
 
@@ -429,7 +433,7 @@ async function createOrder({
     sn: partnerSn,
     resource_id: Number(resourceId),
     title: text(title).slice(0, 200),
-    content: previewUrl,
+    content: text(previewUrl),
     remark: text(remark).slice(0, 500) || undefined,
     owner: text(owner).slice(0, 100) || undefined,
     publish_limited: text(publishLimited) || undefined,
@@ -500,13 +504,17 @@ async function syncOrderBatch(resourceType, orders) {
   const normalizedType = normalizeResourceType(resourceType);
   const data = await request(normalizedType, 'order-query', { sn: orders.map((order) => order.partner_sn) }, 'GET');
   const items = Array.isArray(data) ? data : [];
-  return orders.map((order) => {
+  const syncedOrders = [];
+  const errors = [];
+  orders.forEach((order) => {
     const remote = items.find((item) => item.sn === order.partner_sn);
     if (!remote) {
-      throw new Error(`未查询到超级媒介订单：${order.partner_sn}`);
+      errors.push({ partner_sn: order.partner_sn, article_id: order.article_id, message: `未查询到超级媒介订单：${order.partner_sn}` });
+      return;
     }
-    return updateOrderFromRemote(order, remote);
+    syncedOrders.push(updateOrderFromRemote(order, remote));
   });
+  return { orders: syncedOrders, errors };
 }
 
 async function syncOrdersByProject(projectId) {
@@ -524,12 +532,15 @@ async function syncOrdersByProject(projectId) {
     acc[resourceType].push(order);
     return acc;
   }, {});
+  const errors = [];
   for (const [resourceType, orders] of Object.entries(groups)) {
     for (let index = 0; index < orders.length; index += 20) {
-      result.push(...await syncOrderBatch(resourceType, orders.slice(index, index + 20)));
+      const synced = await syncOrderBatch(resourceType, orders.slice(index, index + 20));
+      result.push(...synced.orders);
+      errors.push(...synced.errors);
     }
   }
-  return result;
+  return { orders: result, errors };
 }
 
 async function manageOrder(order, action, payload = {}) {
@@ -544,8 +555,9 @@ async function manageOrder(order, action, payload = {}) {
   if (!endpointAction) {
     throw new Error(`Unknown chaojimeijie order action: ${action}`);
   }
-  if (endpointAction === 'order-republish' && normalizedType !== 'media') {
-    throw new Error('自媒体订单不支持申请补发。');
+  const rule = orderRules.canManageOrder(order, action, getResourceForOrder(order));
+  if (!rule.allowed) {
+    throw new Error(rule.reason);
   }
   const data = await request(normalizedType, endpointAction, {
     sn: order.partner_sn,
@@ -570,11 +582,17 @@ async function manageOrder(order, action, payload = {}) {
     raw_json: jsonString({ ...(order.raw || {}), last_action: action, last_action_result: data || null }),
     updated_at: timestamp,
   });
-  return getLatestOrderByArticle(order.article_id);
+  const updatedOrder = getLatestOrderByArticle(order.article_id);
+  try {
+    return await syncOrder(updatedOrder);
+  } catch (syncError) {
+    console.warn(`[chaojimeijie] 操作「${action}」成功但同步远端状态失败：${syncError.message || String(syncError)}`);
+    return updatedOrder;
+  }
 }
 
 function mapOrderStatus(statusCode) {
-  return ORDER_STATUS_MAP[Number(statusCode)] || 'publishing';
+  return orderRules.mapOrderStatus(statusCode);
 }
 
 module.exports = {
@@ -582,6 +600,7 @@ module.exports = {
   createOrder,
   flatten,
   getLatestOrderByArticle,
+  getResourceForOrder,
   listResources,
   manageOrder,
   mapOrderStatus,

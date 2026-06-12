@@ -162,7 +162,7 @@ hash_equals($signature, $data['signature']); // 验证结果
 | sn | string | Yes | - | 代理商订单号，必须唯一且最大长度限制为64 |
 | resource_id | int | Yes | - | 资源id |
 | title | string | Yes | - | 稿件标题，最大长度限制为200，需要urlencode处理。 |
-| content | string | Yes | - | 稿件内容预览地址，必须为正确的URL格式，需要urlencode处理。 |
+| content | string | Yes | - | 稿件内容预览地址，必须为正确的URL格式，需要urlencode处理。该字段不是文章正文，必须是公网可访问、浏览器打开后直接展示正文内容的预览页面 URL。 |
 | publish_limited | date | No | null | 限时发布时间，必须为正确的时间格式，推荐格式："Y-m-d\TH:i:sP"；必须晚于提交时间2小时；如果通过格式无法识别时区，默认以UTC时间为准。 |
 | remark | string | No | null | 备注说明，最大长度限制为500，需要urlencode处理。 |
 | owner | string | No | null | 稿件所属客户，最大长度限制为100，需要urlencode处理。 |
@@ -327,7 +327,7 @@ hash_equals($signature, $data['signature']); // 验证结果
 | sn | string | Yes | - | 代理商订单号，必须唯一且最大长度限制为64 |
 | resource_id | int | Yes | - | 资源id |
 | title | string | Yes | - | 稿件标题，最大长度限制为200，需要urlencode处理。 |
-| content | string | Yes | - | 稿件内容预览地址，必须为正确的URL格式，需要urlencode处理。 |
+| content | string | Yes | - | 稿件内容预览地址，必须为正确的URL格式，需要urlencode处理。该字段不是文章正文，必须是公网可访问、浏览器打开后直接展示正文内容的预览页面 URL。 |
 | publish_limited | date | No | null | 限时发布时间，必须为正确的时间格式，推荐格式："Y-m-d\TH:i:sP"； 必须晚于提交时间2小时；如果通过格式无法识别时区，默认以UTC时间为准。 自2026年4月10日起，自媒体不再支持限时发布。 |
 | remark | string | No | null | 备注说明，最大长度限制为500，需要urlencode处理。 |
 | owner | string | No | null | 稿件所属客户，最大长度限制为100，需要urlencode处理。 |
@@ -405,6 +405,34 @@ hash_equals($signature, $data['signature']); // 验证结果
 | published_at | date|null | 发布时间，未发布时为null |
 | status | int | 状态，参见附录：订单状态 |
 | feedback | dict|null | 订单最后一步操作反馈数据，因订单状态而异，参见附录：订单反馈信息 |
+
+## 接入实现注意事项
+
+### 稿件内容预览地址
+
+官方接口只提供 `content` 参数，含义是“稿件内容预览地址”。该字段必须传 URL，不支持直接传文章正文、HTML 字符串、Markdown 字符串、docx 文件或 OSS 专用上传对象。
+
+超级媒介不要求必须使用 OSS。OSS 可以作为存储层，但提交给超级媒介的 URL 必须是浏览器打开后直接展示文章标题和正文的公网 HTML 页面，不能是会触发下载的原始文件链接。
+
+如果使用 OSS，应通过自定义域名、静态网站或 CDN 回源提供预览页，并确保响应满足：
+
+| 检查项 | 要求 |
+|---|---|
+| HTTP 状态 | `200` |
+| Content-Type | `text/html` |
+| Content-Disposition | 不能包含 `attachment` |
+| 页面内容 | 应包含当前稿件标题和正文关键内容 |
+
+### 错误做法与正确做法
+
+| 做法 | 结论 |
+|---|---|
+| 提交 raw OSS `.html` 文件链接，打开后下载 | 错误。超级媒介编辑器可能只读取到链接。 |
+| 提交 raw OSS `.txt` 文件链接，打开后下载 | 错误。改后缀不能解决问题，`.txt` 方案应废弃。 |
+| 把文章正文、HTML 或 Markdown 直接放进 `content` | 错误。官方文档要求该字段是 URL。 |
+| 提交公网 HTML 预览页 URL，页面直接渲染标题和正文 | 正确。 |
+
+已经提交到超级媒介且内容被读取成链接的订单，通常需要取消后使用新的预览页 URL 重新提交，或在超级媒介后台重新读取稿件。单纯修改 OSS 对象不一定能修复已进入编辑器的内容。
 
 ## 事件通知
 

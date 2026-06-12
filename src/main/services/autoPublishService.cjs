@@ -380,7 +380,7 @@ async function autoPublishArticles(projectId, options = {}) {
       results.push({
         draftId: draft.id,
         title: text(draft.draft?.title),
-        status: 'published',
+        status: 'publishing',
         orderId: order?.id,
         resource: {
           id: resource.id,
@@ -408,7 +408,8 @@ async function autoPublishArticles(projectId, options = {}) {
   return {
     projectId,
     total: toPublish.length,
-    published: results.filter((r) => r.status === 'published').length,
+    submitted: results.filter((r) => r.status === 'publishing').length,
+    published: 0,
     skipped: results.filter((r) => r.status === 'skipped').length,
     failed: results.filter((r) => r.status === 'failed').length,
     results,

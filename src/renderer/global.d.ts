@@ -538,6 +538,8 @@ declare global {
     status_code?: number | null;
     published_url?: string | null;
     feedback?: Record<string, unknown> | null;
+    raw?: Record<string, unknown> | null;
+    resource?: GeoAgentPublishResource | null;
     last_synced_at?: string | null;
     created_at?: string;
     updated_at?: string;
@@ -848,13 +850,14 @@ declare global {
       }) => Promise<{
         projectId: string;
         total: number;
+        submitted?: number;
         published: number;
         skipped: number;
         failed: number;
         results: Array<{
           draftId: string;
           title?: string;
-          status: 'published' | 'skipped' | 'failed' | 'dry_run';
+          status: 'publishing' | 'published' | 'skipped' | 'failed' | 'dry_run';
           orderId?: string;
           resource?: { id: string; name: string; price: number };
           reason?: string;
@@ -862,7 +865,7 @@ declare global {
         }>;
       }>;
       syncPublishOrder: (articleId: string) => Promise<GeoAgentGeoArticleDraft>;
-      syncPublishOrders: (projectId: string) => Promise<{ project_id: string; drafts: GeoAgentGeoArticleDraft[] }>;
+      syncPublishOrders: (projectId: string) => Promise<{ project_id: string; drafts: GeoAgentGeoArticleDraft[]; errors?: Array<{ partner_sn?: string; article_id?: string; message: string }> }>;
       managePublishOrder: (articleId: string, action: 'urge' | 'cancel' | 'apply-refund' | 'apply-republish', payload?: { reason?: string; remark?: string }) => Promise<GeoAgentGeoArticleDraft>;
       recordPublishedUrl: (articleId: string, payload: { published_url: string; published_platform?: string; published_at?: string; external_id?: string }) => Promise<GeoAgentGeoArticleDraft>;
       runVisibilityCheckStream?: (

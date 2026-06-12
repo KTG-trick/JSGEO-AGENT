@@ -5,6 +5,7 @@ const knowledgeService = require('./knowledgeService.cjs');
 const ossPreviewService = require('./ossPreviewService.cjs');
 const publishRecommendationService = require('./publishRecommendationService.cjs');
 const { fieldText } = require('./profileFieldService.cjs');
+const orderRules = require('../../shared/chaojimeijieOrderRules.cjs');
 
 const PUBLISH_STATUSES = new Set(['draft', 'reviewed', 'scheduled', 'publishing', 'published', 'failed', 'confirmed']);
 
@@ -29,6 +30,16 @@ function text(value) {
   return String(value ?? '').trim();
 }
 
+function normalizeForPreviewCheck(value) {
+  return text(value)
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/^[-*]\s+/gm, '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\s+/g, ' ')
+    .slice(0, 80);
+}
+
 function projectIdFromGeoId(value) {
   return String(value || '').replace(/^geo-/, '');
 }
@@ -42,6 +53,12 @@ function getLatestPublishOrder(articleId) {
     LIMIT 1
   `).get(articleId);
   if (!row) return null;
+  const resourceRow = getDb().prepare(`
+    SELECT *
+    FROM publish_resources
+    WHERE provider = ? AND resource_type = ? AND resource_id = ?
+    LIMIT 1
+  `).get(row.provider, row.resource_type, Number(row.resource_id));
   return {
     id: row.id,
     provider: row.provider,
@@ -53,6 +70,17 @@ function getLatestPublishOrder(articleId) {
     status_code: row.status_code,
     published_url: row.published_url,
     feedback: jsonParse(row.feedback_json, null),
+    raw: jsonParse(row.raw_json, null),
+    resource: resourceRow ? {
+      id: resourceRow.id,
+      provider: resourceRow.provider,
+      resource_type: resourceRow.resource_type,
+      resource_id: resourceRow.resource_id,
+      name: resourceRow.name,
+      price: resourceRow.price,
+      status: resourceRow.status,
+      raw: jsonParse(resourceRow.raw_json, null),
+    } : null,
     last_synced_at: row.last_synced_at,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -160,9 +188,23 @@ function buildPreviewInput(draft) {
 async function prepareArticlePreview(articleId) {
   const draft = articleDraftService.getArticleDraft(articleId);
   const existing = publicationOf(draft);
-  if (existing.preview_url && existing.preview_object_key) {
+  if (existing.preview_url && existing.preview_object_key && /\.html?$/i.test(existing.preview_object_key)) {
+    const url = ossPreviewService.getPreviewUrl(existing.preview_object_key);
+    if (url !== existing.preview_url) {
+      const nextDraft = saveDraftWithStatus(articleId, {
+        publication_evidence: {
+          ...(draft.draft.publication_evidence || {}),
+          preview_url: url,
+        },
+      }, draft.status);
+      return {
+        url,
+        object_key: existing.preview_object_key,
+        draft: nextDraft,
+      };
+    }
     return {
-      url: existing.preview_url,
+      url,
       object_key: existing.preview_object_key,
       draft,
     };
@@ -191,6 +233,30 @@ function getArticlePreviewHtml(articleId) {
   const draft = articleDraftService.getArticleDraft(articleId);
   const previewInput = buildPreviewInput(draft);
   return ossPreviewService.getPreviewHtml(previewInput);
+}
+
+async function assertPreviewReadable(previewUrl, { title, content }) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  let response;
+  try {
+    response = await fetch(previewUrl, { method: 'GET', signal: controller.signal });
+  } catch (error) {
+    throw new Error(`稿件预览 URL 无法访问，已停止投递：${error.message || String(error)}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+  if (!response.ok) {
+    throw new Error(`稿件预览 URL 返回 ${response.status}，已停止投递。`);
+  }
+  const contentDisposition = text(response.headers?.get?.('content-disposition')).toLowerCase();
+  if (contentDisposition.includes('attachment')) {
+    throw new Error('稿件预览 URL 会触发下载，不是在线预览，已停止投递。');
+  }
+  const contentType = text(response.headers?.get?.('content-type')).toLowerCase();
+  if (!contentType.includes('text/html')) {
+    throw new Error(`稿件预览 URL 不是 HTML 页面（${contentType || '未返回 Content-Type'}），已停止投递。`);
+  }
 }
 
 async function deleteArticleOssPreview(articleId) {
@@ -283,9 +349,15 @@ async function publishViaChaojimeijie(draft, options = {}) {
   const resourceType = options.resourceType === 'we-media' ? 'we-media' : 'media';
   const resourceId = Number(options.resourceId);
   if (!resourceId) throw new Error('请选择超级媒介资源后再投递。');
+  const existingOrder = chaojimeijieService.getLatestOrderByArticle(draft.id);
+  if (existingOrder && !orderRules.canCreateNewOrder(existingOrder)) {
+    const statusLabel = orderRules.statusLabel(existingOrder.status_code);
+    throw new Error(`当前稿件已有超级媒介订单（${existingOrder.partner_sn}，${statusLabel}），不能重复投递。请先同步或处理该订单。`);
+  }
 
-  const { owner, title } = buildPreviewInput(draft);
+  const { owner, title, content } = buildPreviewInput(draft);
   const preview = await prepareArticlePreview(draft.id);
+  await assertPreviewReadable(preview.url, { title, content });
   const remark = text(options.remark)
     || `${articleRoleOf(draft) || 'article'}: ${text(draft.draft.target_question).slice(0, 120)}`;
   let order;
@@ -432,10 +504,12 @@ async function syncPublishOrder(articleId) {
 
 async function syncPublishOrders(projectIdOrGeoId) {
   const projectId = projectIdFromGeoId(projectIdOrGeoId);
-  const orders = await chaojimeijieService.syncOrdersByProject(projectId);
+  const synced = await chaojimeijieService.syncOrdersByProject(projectId);
+  const orders = Array.isArray(synced) ? synced : synced.orders || [];
   return {
     project_id: projectId,
     drafts: orders.map((order) => applySyncedOrderToDraft(order.article_id, order)),
+    errors: Array.isArray(synced?.errors) ? synced.errors : [],
   };
 }
 
@@ -467,6 +541,7 @@ function recommendPublishResources(articleId, options = {}) {
 module.exports = {
   PUBLISH_STATUSES,
   getRankedPublishQuota,
+  assertPreviewReadable,
   listArticleDrafts,
   listPublishResources,
   managePublishOrder,
