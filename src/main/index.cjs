@@ -20,6 +20,7 @@ const articlePublishService = require('./services/articlePublishService.cjs');
 const visibilityCheckService = require('./services/visibilityCheckService.cjs');
 const reflectionService = require('./services/reflectionService.cjs');
 const skillService = require('./services/skillService.cjs');
+const autoLearningScheduler = require('./services/autoLearningScheduler.cjs');
 const { fieldText } = require('./services/profileFieldService.cjs');
 const llmGateway = require('./services/llmGateway.cjs');
 const contextWindowService = require('./services/contextWindowService.cjs');
@@ -2102,6 +2103,32 @@ function registerHandlers() {
   ipcMain.handle('geo-agent:list-evolution-rules', async (_event, projectId, filters = {}) => {
     return reflectionService.listEvolutionRules(projectId, filters);
   });
+
+  ipcMain.handle('geo-agent:get-auto-learning-status', async () => {
+    return autoLearningScheduler.getStatus();
+  });
+
+  ipcMain.handle('geo-agent:trigger-auto-learning-now', async (event) => {
+    const requestId = `auto-learn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const channel = `geo-agent:trigger-auto-learning-stream:${requestId}`;
+
+    autoLearningScheduler.runCycle()
+      .then((result) => {
+        event.sender.send(channel, { type: 'result', result });
+        event.sender.send(channel, { type: 'done' });
+      })
+      .catch((error) => {
+        event.sender.send(channel, { type: 'error', message: error.message });
+        event.sender.send(channel, { type: 'done' });
+      });
+
+    return { requestId, channel };
+  });
+
+  ipcMain.handle('geo-agent:set-auto-learning-interval', async (_event, payload) => {
+    const { intervalMs } = payload || {};
+    return autoLearningScheduler.setIntervalMs(intervalMs);
+  });
 }
 
 function shouldUseDatabaseFallback(error) {
@@ -2159,11 +2186,14 @@ process.on('unhandledRejection', (reason, promise) => {
 
 app.whenReady().then(async () => {
   initializeDatabaseForCurrentUser();
+  autoLearningScheduler.init(getDb());
   knowledgeService.markInterruptedDrafts({ olderThanMs: 0 });
   await createWindow();
+  autoLearningScheduler.start();
 });
 
 app.on('before-quit', () => {
+  autoLearningScheduler.stop();
   closeDatabase();
 });
 
