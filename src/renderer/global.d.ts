@@ -668,6 +668,23 @@ declare global {
           search_usage?: GeoAgentSearchUsage;
           reasoning_content?: string | null;
           reasoning_delta?: string;
+          context_usage?: {
+            usedTokens: number;
+            maxTokens: number;
+            usagePercentage?: number;
+            modelId?: string;
+            inputTokens?: number;
+            outputTokens?: number;
+            reasoningTokens?: number;
+            cacheTokens?: number;
+          };
+          suggestions?: Array<{
+            label: string;
+            value: string;
+            actionType?: 'send_message' | 'propose_action' | 'navigate';
+            payload?: Record<string, unknown>;
+          }>;
+          additional_articles?: unknown;
           search_status?: 'in_progress' | 'completed';
           search_query?: string;
           search_action?: GeoAgentSearchAction;
@@ -684,6 +701,23 @@ declare global {
         search_actions?: GeoAgentSearchAction[];
         search_usage?: GeoAgentSearchUsage;
         reasoning_content?: string | null;
+        context_usage?: {
+          usedTokens: number;
+          maxTokens: number;
+          usagePercentage?: number;
+          modelId?: string;
+          inputTokens?: number;
+          outputTokens?: number;
+          reasoningTokens?: number;
+          cacheTokens?: number;
+        };
+        suggestions?: Array<{
+          label: string;
+          value: string;
+          actionType?: 'send_message' | 'propose_action' | 'navigate';
+          payload?: Record<string, unknown>;
+        }>;
+        additional_articles?: unknown;
       }>;
       getProjects: () => Promise<{ projects: GeoAgentProjectSummary[] }>;
       createProject: (payload: GeoAgentCreateProjectPayload) => Promise<{ project: GeoAgentProjectSummary }>;
@@ -797,6 +831,34 @@ declare global {
           error?: string;
         }) => void
       ) => Promise<{ type: 'done'; status?: string; already_running?: boolean; message?: GeoAgentConversationMessage }>;
+      runGeoAdditionalArticlesStream?: (
+        geoProjectId: string,
+        platform: 'doubao' | 'deepseek',
+        options: {
+          count?: number;
+          articleRole?: 'support' | 'ranking' | 'auto';
+          instruction?: string;
+          conversationId?: string | null;
+        },
+        onEvent: (event: {
+          type: 'meta' | 'status' | 'result' | 'done' | 'error';
+          step_index?: number;
+          step_label?: string;
+          conversation_id?: string;
+          message?: GeoAgentConversationMessage | string;
+          additional_articles?: {
+            geo_project_id: string;
+            enterprise_project_id: string;
+            platform: string;
+            status: string;
+            drafts: GeoAgentGeoArticleDraft[];
+            total: number;
+            count: number;
+            error_message?: string | null;
+          };
+          error?: string;
+        }) => void
+      ) => Promise<{ type: 'done'; status?: string; message?: GeoAgentConversationMessage; additional_articles?: unknown }>;
       getLatestGeoArticleDraft: (
         geoProjectId: string,
         platform: 'doubao' | 'deepseek',
@@ -817,6 +879,12 @@ declare global {
         publish_target?: string;
         revision_summary?: string;
       }>;
+      proposeKnowledgeUpdate: (
+        projectId: string,
+        instruction: string,
+        conversationId?: string | null
+      ) => Promise<Record<string, unknown>>;
+      applyKnowledgeUpdate: (payload: Record<string, unknown>) => Promise<unknown>;
       markArticleReviewed: (articleId: string) => Promise<GeoAgentGeoArticleDraft>;
       prepareArticlePreview: (articleId: string) => Promise<{ url: string; object_key: string; draft: GeoAgentGeoArticleDraft }>;
       getArticlePreviewHtml: (articleId: string) => Promise<string>;

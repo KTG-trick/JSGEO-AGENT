@@ -275,6 +275,52 @@ function contextFromInputs({ profile, questions, discovery, ragChunks }) {
   return { factsUsed, sources, publishTarget, ragChunks, profile: profileSnapshot(profile), questions };
 }
 
+function existingDraftSummaries(projectId, platform) {
+  return getDb().prepare(`
+    SELECT article_type, draft_json
+    FROM geo_article_drafts
+    WHERE project_id = ? AND platform = ?
+    ORDER BY datetime(created_at) DESC
+    LIMIT 40
+  `).all(projectId, platform).map((row) => {
+    const draft = jsonParse(row.draft_json, {});
+    return {
+      title: normalizeText(draft.title),
+      article_role: normalizeText(draft.article_role),
+      article_type: normalizeText(draft.article_type || row.article_type),
+      article_theme: normalizeText(draft.article_theme || draft.theme),
+      target_question: normalizeText(draft.target_question),
+    };
+  }).filter((item) => item.title || item.article_theme || item.target_question);
+}
+
+function chooseAdditionalSlots({ articleRole = 'auto', count = 1, existing = [] } = {}) {
+  const normalizedRole = normalizeText(articleRole) === 'ranking'
+    ? 'ranking'
+    : normalizeText(articleRole) === 'support'
+      ? 'support'
+      : 'auto';
+  const pool = normalizedRole === 'ranking'
+    ? RANKING_PLAN
+    : normalizedRole === 'support'
+      ? SUPPORT_PLAN
+      : [...RANKING_PLAN, ...SUPPORT_PLAN];
+  const usedThemes = new Set(existing.map((item) => normalizeText(item.article_theme)).filter(Boolean));
+  const sorted = [
+    ...pool.filter((slot) => !usedThemes.has(normalizeText(slot.theme))),
+    ...pool.filter((slot) => usedThemes.has(normalizeText(slot.theme))),
+  ];
+  const slots = [];
+  for (let index = 0; index < count; index += 1) {
+    const base = sorted[index % sorted.length];
+    slots.push({
+      ...base,
+      theme: index < sorted.length ? base.theme : `${base.theme}（补充角度 ${Math.floor(index / sorted.length) + 1}）`,
+    });
+  }
+  return slots;
+}
+
 function buildArticleMessages({ profile, questions, discovery, ragChunks, slot }) {
   const snapshot = profileSnapshot(profile);
   const skill = skillService.getSkill('geo-support-content');
@@ -329,6 +375,20 @@ function buildArticleMessages({ profile, questions, discovery, ragChunks, slot }
       }),
     },
   ];
+}
+
+function buildAdditionalArticleMessages({ profile, questions, discovery, ragChunks, slot, instruction, existingDrafts }) {
+  const messages = buildArticleMessages({ profile, questions, discovery, ragChunks, slot });
+  const userPayload = JSON.parse(messages[1].content);
+  userPayload.task = 'generate_additional_geo_article_draft';
+  userPayload.additional_instruction = normalizeText(instruction);
+  userPayload.existing_drafts_to_avoid = existingDrafts;
+  userPayload.required_output.content = '完整 Markdown 正文，1000-1500 字左右，必须可直接进入稿件管理校对';
+  messages[1].content = JSON.stringify(userPayload);
+  messages[0].content = `${messages[0].content}
+- 这是追加稿件生成任务，必须避开 existing_drafts_to_avoid 中已有标题、主题和表达角度。
+- 不要只输出摘要、标题列表或大纲；必须输出完整正文并满足 JSON 结构。`;
+  return messages;
 }
 
 function buildRevisionMessages({ draft, profile, ragChunks, mode, instruction }) {
@@ -412,6 +472,50 @@ async function generateDraftForSlot({ projectId, platform, profile, questionSet,
   });
   const parsed = parseDraftContent(result.content);
   return normalizeDraftPayload(parsed, slot, context);
+}
+
+async function generateAdditionalDraftForSlot({ projectId, platform, profile, questionSet, discovery, slot, index, instruction, existingDrafts, onEvent }) {
+  const questions = selectQuestionsForSlot(getConfirmedQuestions(questionSet), slot, index);
+  const ragQuery = buildRagQuery(profile, questions, slot);
+  const ragResponse = await knowledgeService.searchKnowledge({ projectId, query: ragQuery, limit: 6 });
+  const ragChunks = (ragResponse.entries || []).map((entry) => ({
+    id: entry.id,
+    title: entry.title,
+    content: entry.content,
+    metadata: entry.metadata || entry.metadata_json || null,
+  }));
+  const context = contextFromInputs({ profile, questions, discovery, ragChunks });
+  const policy = getTaskPolicy('support_content_generation', { platform });
+
+  onEvent?.({
+    type: 'status',
+    step_index: index,
+    step_label: `追加生成${slot.theme}`,
+    message: `正在追加生成：${slot.theme}`,
+  });
+
+  const result = await streamLLM({
+    messages: buildAdditionalArticleMessages({ profile, questions, discovery, ragChunks, slot, instruction, existingDrafts }),
+    temperature: 0.38,
+    maxTokens: 6000,
+    provider: policy.provider,
+    model: policy.model,
+    networkMode: policy.network_mode,
+    deepThinking: policy.deep_thinking,
+    taskType: 'support_content_generation',
+    apiFamily: policy.api_family,
+    onEvent: (event) => {
+      if (event.type === 'reasoning_delta') {
+        onEvent?.(event);
+      }
+    },
+  });
+  const parsed = parseDraftContent(result.content);
+  const draft = normalizeDraftPayload(parsed, slot, context);
+  return {
+    ...draft,
+    generation_reason: normalizeText(instruction) || '用户在对话中要求继续生成文章',
+  };
 }
 
 function insertDraft({ projectId, platform, questionSetId, draft }) {
@@ -534,6 +638,54 @@ async function generateSupportArticles({ geoProjectId, platform = 'doubao', onEv
     total: drafts.length,
     error_message: null,
   };
+}
+
+async function generateAdditionalArticles({ geoProjectId, platform = 'doubao', count = 1, articleRole = 'auto', instruction = '', onEvent = null } = {}) {
+  const { projectId, profile, questionSet, discovery } = requiredInputs({ geoProjectId, platform });
+  const normalizedCount = Math.min(6, Math.max(1, Number(count || 1)));
+  const existing = existingDraftSummaries(projectId, platform);
+  const slots = chooseAdditionalSlots({ articleRole, count: normalizedCount, existing });
+  const drafts = [];
+  for (let index = 0; index < slots.length; index += 1) {
+    const slot = slots[index];
+    const draft = await generateAdditionalDraftForSlot({
+      projectId,
+      platform,
+      profile,
+      questionSet,
+      discovery,
+      slot,
+      index,
+      instruction,
+      existingDrafts: existing.concat(drafts.map((item) => ({
+        title: item.draft.title,
+        article_role: item.draft.article_role,
+        article_type: item.draft.article_type,
+        article_theme: item.draft.article_theme,
+        target_question: item.draft.target_question,
+      }))),
+      onEvent,
+    });
+    drafts.push(insertDraft({ projectId, platform, questionSetId: questionSet.id, draft }));
+  }
+  return {
+    geo_project_id: `geo-${projectId}`,
+    enterprise_project_id: projectId,
+    platform,
+    status: 'completed',
+    drafts,
+    total: drafts.length,
+    requested_count: Number(count || 1),
+    count: normalizedCount,
+    article_role: articleRole || 'auto',
+    error_message: null,
+  };
+}
+
+async function generateAdditionalArticlesStream(payload = {}, onEvent = null) {
+  const result = await generateAdditionalArticles({ ...payload, onEvent });
+  onEvent?.({ type: 'result', additional_articles: result });
+  return result;
 }
 
 async function generateSupportArticlesStream(payload = {}, onEvent = null) {
@@ -660,6 +812,8 @@ async function reviseArticleDraft(articleId, options = {}) {
 
 module.exports = {
   confirmArticleDraft,
+  generateAdditionalArticles,
+  generateAdditionalArticlesStream,
   generateArticleDraft,
   generateSupportArticles,
   generateSupportArticlesStream,

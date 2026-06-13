@@ -208,6 +208,49 @@ function projectIdFromGeoProjectId(geoProjectId) {
   return String(geoProjectId || '').replace(/^geo-/, '');
 }
 
+function parseRequestedArticleCount(text) {
+  const value = String(text || '');
+  const digitMatch = value.match(/(\d{1,2})\s*篇/);
+  if (digitMatch) return Math.min(6, Math.max(1, Number(digitMatch[1] || 1)));
+  const cnMap = { 一: 1, 两: 2, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+  const cnMatch = value.match(/([一两二三四五六七八九十])\s*篇/);
+  if (cnMatch) return Math.min(6, Math.max(1, cnMap[cnMatch[1]] || 1));
+  return 1;
+}
+
+function inferAdditionalArticleRequest(text) {
+  const value = String(text || '').trim();
+  if (!value) return null;
+  const asksArticle = /(文章|稿件|内容|排行榜稿|支撑稿|测评稿|咨询稿)/.test(value);
+  const asksMore = /(继续|再|另|多|补充|加|生成|写|来)/.test(value);
+  if (!asksArticle || !asksMore) return null;
+  const articleRole = /(排行|榜单|TOP|top)/.test(value)
+    ? 'ranking'
+    : /(支撑|科普|咨询|测评|案例|品牌)/.test(value)
+      ? 'support'
+      : 'auto';
+  return {
+    count: parseRequestedArticleCount(value),
+    articleRole,
+    instruction: value,
+  };
+}
+
+function contextUsagePayload(tokenUsage, modelId = '') {
+  const total = Number(tokenUsage?.total || 0);
+  const maxTokens = Number(tokenUsage?.maxTokens || 0);
+  return {
+    usedTokens: total,
+    maxTokens,
+    usagePercentage: Number(tokenUsage?.usagePercentage || (maxTokens ? Math.round((total / maxTokens) * 100) : 0)),
+    modelId,
+    inputTokens: total,
+    outputTokens: 0,
+    reasoningTokens: 0,
+    cacheTokens: 0,
+  };
+}
+
 function prepareKnowledgeDraftContext(payload = {}) {
   const intent = payload.intent || 'create';
   let projectId = intent === 'create' && !payload.reuse_draft_project
@@ -908,6 +951,81 @@ function registerHandlers() {
         metadata: { type: 'chat_user' },
       });
 
+      const additionalArticleRequest = inferAdditionalArticleRequest(payload.message);
+      if (additionalArticleRequest && projectId) {
+        const platform = payload.platform || 'doubao';
+        const stageMessage = conversationService.addMessage({
+          conversationId: conversation.id,
+          projectId,
+          role: 'assistant',
+          content: `正在继续生成 ${additionalArticleRequest.count} 篇完整稿件，生成后会保存到稿件管理。`,
+          metadata: {
+            type: 'geo_additional_articles',
+            status: 'streaming',
+            phase: 4,
+            platform,
+            request: additionalArticleRequest,
+          },
+        });
+        event.sender.send(channel, {
+          type: 'meta',
+          conversation_id: conversation.id,
+          message: stageMessage,
+          platform,
+          action: 'additional_articles',
+        });
+        const additionalResult = await articleDraftService.generateAdditionalArticlesStream(
+          {
+            geoProjectId: `geo-${projectId}`,
+            platform,
+            ...additionalArticleRequest,
+          },
+          (streamEvent) => {
+            event.sender.send(channel, streamEvent);
+          },
+        );
+        const content = additionalResult.status === 'completed'
+          ? `已继续生成 ${additionalResult.total || additionalArticleRequest.count} 篇完整稿件，均已保存到稿件管理，可继续校对、预览和发布。`
+          : `继续生成稿件失败：${additionalResult.error_message || '请稍后重试。'}`;
+        const savedMessage = conversationService.updateConversationMessage({
+          messageId: stageMessage.id,
+          conversationId: conversation.id,
+          projectId,
+          content,
+          metadata: {
+            type: 'geo_additional_articles',
+            status: additionalResult.status || 'completed',
+            phase: 4,
+            platform,
+            request: additionalArticleRequest,
+            additional_articles: additionalResult,
+            confirmation_state: 'output-available',
+            confirmation_approved: true,
+          },
+        });
+        const doneEvent = {
+          type: 'done',
+          conversation_id: conversation.id,
+          message: savedMessage,
+          content,
+          additional_articles: additionalResult,
+          provider: '',
+          model: '',
+          error: null,
+          sources: [],
+          search_queries: [],
+          search_actions: [],
+          search_usage: {},
+          suggestions: [
+            { label: '再生成 1 篇排行榜稿', value: '再生成 1 篇排行榜稿', actionType: 'send_message' },
+            { label: '生成 3 篇支撑稿', value: '再生成 3 篇支撑稿', actionType: 'send_message' },
+            { label: '前往稿件管理校对', value: 'drafts', actionType: 'navigate', payload: { view: 'drafts' } },
+          ],
+        };
+        event.sender.send(channel, doneEvent);
+        return doneEvent;
+      }
+
       // 使用上下文窗口管理服务构建消息历史
       const contextMessages = await contextWindowService.buildContextWindow(
         conversation.id,
@@ -922,10 +1040,6 @@ function registerHandlers() {
           content: contextMessages.systemPrompt,
         },
         ...contextMessages.history,
-        {
-          role: 'user',
-          content: payload.message || '',
-        },
       ];
 
       // 记录 token 使用情况（用于调试）
@@ -953,6 +1067,7 @@ function registerHandlers() {
               conversation_id: conversation.id,
               provider,
               model,
+              context_usage: contextUsagePayload(contextMessages.tokenUsage, model || provider),
             });
           }
           if (streamEvent.type === 'status') {
@@ -989,6 +1104,7 @@ function registerHandlers() {
           provider,
           model,
           status: 'complete',
+          context_usage: contextUsagePayload(contextMessages.tokenUsage, model || provider),
         },
       });
       event.sender.send(channel, {
@@ -1003,6 +1119,7 @@ function registerHandlers() {
         search_actions: [],
         search_usage: {},
         reasoning_content: reasoningContent,
+        context_usage: contextUsagePayload(contextMessages.tokenUsage, model || provider),
       });
       return {
         type: 'done',
@@ -1016,6 +1133,7 @@ function registerHandlers() {
         search_actions: [],
         search_usage: {},
         reasoning_content: reasoningContent,
+        context_usage: contextUsagePayload(contextMessages.tokenUsage, model || provider),
       };
     } catch (error) {
       const message = error.message || String(error);
@@ -1666,6 +1784,98 @@ function registerHandlers() {
     }
   });
 
+  ipcMain.handle('geo-agent:run-geo-additional-articles-stream', async (event, request = {}) => {
+    const requestId = request.requestId;
+    const payload = request.payload || request;
+    const options = payload.options || {};
+    const channel = `geo-agent:run-geo-additional-articles-stream:${requestId}`;
+    const projectId = projectIdFromGeoProjectId(payload.geoProjectId || payload.geo_project_id);
+    let conversation = null;
+    let stageMessage = null;
+    try {
+      if (projectId) {
+        conversation = conversationService.ensureConversation({
+          projectId,
+          conversationId: options.conversationId || options.conversation_id || null,
+          title: `${payload.platform || 'GEO'} 追加稿件生成`,
+          firstMessage: options.instruction || '继续生成完整稿件',
+          kind: 'geo_workflow',
+        });
+        stageMessage = conversationService.addMessage({
+          conversationId: conversation.id,
+          projectId,
+          role: 'assistant',
+          content: `正在继续生成 ${Math.min(6, Math.max(1, Number(options.count || 1)))} 篇完整稿件。`,
+          metadata: {
+            type: 'geo_additional_articles',
+            status: 'streaming',
+            phase: 4,
+            platform: payload.platform || 'doubao',
+          },
+        });
+        event.sender.send(channel, {
+          type: 'meta',
+          platform: payload.platform,
+          phase: 4,
+          conversation_id: conversation.id,
+          message: stageMessage,
+        });
+      }
+      const result = await articleDraftService.generateAdditionalArticlesStream(
+        {
+          geoProjectId: payload.geoProjectId || payload.geo_project_id,
+          platform: payload.platform || 'doubao',
+          count: options.count,
+          articleRole: options.articleRole || options.article_role || 'auto',
+          instruction: options.instruction || '',
+        },
+        (streamEvent) => event.sender.send(channel, streamEvent),
+      );
+      if (conversation && stageMessage && projectId) {
+        stageMessage = conversationService.updateConversationMessage({
+          messageId: stageMessage.id,
+          conversationId: conversation.id,
+          projectId,
+          content: `已继续生成 ${result.total || 0} 篇完整稿件，均已保存到稿件管理。`,
+          metadata: {
+            type: 'geo_additional_articles',
+            status: result.status || 'completed',
+            phase: 4,
+            platform: result.platform || payload.platform || 'doubao',
+            additional_articles: result,
+            confirmation_state: 'output-available',
+            confirmation_approved: true,
+          },
+        });
+      }
+      event.sender.send(channel, {
+        type: 'done',
+        status: 'completed',
+        conversation_id: conversation?.id,
+        message: stageMessage,
+        additional_articles: result,
+      });
+      return { type: 'done', status: 'completed', conversation_id: conversation?.id, message: stageMessage, additional_articles: result };
+    } catch (error) {
+      const message = error.message || String(error);
+      if (conversation && projectId) {
+        try {
+          conversationService.addMessage({
+            conversationId: conversation.id,
+            projectId,
+            role: 'assistant',
+            content: `继续生成稿件失败：${message}`,
+            metadata: { type: 'geo_additional_articles', status: 'failed', phase: 4, error: message },
+          });
+        } catch (archiveError) {
+          console.warn('[conversation] failed to archive additional articles error', archiveError);
+        }
+      }
+      event.sender.send(channel, { type: 'error', error: message, conversation_id: conversation?.id });
+      return { type: 'error', error: message, conversation_id: conversation?.id };
+    }
+  });
+
   ipcMain.handle('geo-agent:get-latest-geo-article-draft', async (_event, geoProjectId, platform = 'doubao', articleType = null) => {
     return articleDraftService.getLatestArticleDraft(geoProjectId, platform, articleType);
   });
@@ -1692,6 +1902,30 @@ function registerHandlers() {
 
   ipcMain.handle('geo-agent:revise-article-draft', async (_event, articleId, options = {}) => {
     return articleDraftService.reviseArticleDraft(articleId, options);
+  });
+
+  ipcMain.handle('geo-agent:propose-knowledge-update', async (_event, payload = {}) => {
+    const projectId = payload.projectId || payload.project_id;
+    const instruction = String(payload.instruction || '').trim();
+    if (!projectId) throw new Error('projectId is required.');
+    if (!instruction) throw new Error('instruction is required.');
+    const current = knowledgeService.getKnowledgeProfile(projectId).profile || {};
+    return {
+      id: `knowledge-update-${Date.now()}`,
+      project_id: projectId,
+      instruction,
+      current_profile: current,
+      patch: {},
+      summary: '已生成待确认知识库更新请求。请在确认前补充具体字段和值；确认后才会写入知识库。',
+      requires_confirmation: true,
+    };
+  });
+
+  ipcMain.handle('geo-agent:apply-knowledge-update', async (_event, payload = {}) => {
+    const projectId = payload.projectId || payload.project_id;
+    const patch = payload.patch || payload.profile || {};
+    if (!projectId) throw new Error('projectId is required.');
+    return knowledgeService.updateKnowledgeProfile(projectId, patch);
   });
 
   ipcMain.handle('geo-agent:mark-article-reviewed', async (_event, articleId) => {

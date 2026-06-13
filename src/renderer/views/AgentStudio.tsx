@@ -88,6 +88,19 @@ import {
   SourcesTrigger,
 } from '../components/ai-elements/sources';
 import { Suggestion, Suggestions } from '../components/ai-elements/suggestion';
+import {
+  Context,
+  ContextCacheUsage,
+  ContextContent,
+  ContextContentBody,
+  ContextContentFooter,
+  ContextContentHeader,
+  ContextInputUsage,
+  ContextOutputUsage,
+  ContextReasoningUsage,
+  ContextTrigger,
+  ContextUsageSummary,
+} from '../components/ai-elements/context';
 import { cn } from '../lib/utils';
 import {
   Dialog,
@@ -112,6 +125,26 @@ type PromptAttachment = {
   type?: string;
 };
 
+type ContextUsage = {
+  usedTokens: number;
+  maxTokens: number;
+  usagePercentage?: number;
+  modelId?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  cacheTokens?: number;
+};
+
+type ChatSuggestion = {
+  label: string;
+  value: string;
+  actionType?: 'send_message' | 'propose_action' | 'navigate';
+  payload?: Record<string, unknown>;
+  icon?: React.ComponentType<{ className?: string }>;
+  variant?: 'default' | 'secondary' | 'outline';
+};
+
 /**
  * ChatMessage 类型定义
  *
@@ -131,12 +164,7 @@ type ChatMessage = {
 
   // 用户消息字段
   attachmentIds?: string[];
-  suggestions?: Array<{
-    label: string;
-    value: string;
-    icon?: React.ComponentType<{ className?: string }>;
-    variant?: 'default' | 'secondary' | 'outline';
-  }>;
+  suggestions?: ChatSuggestion[];
 
   // 助手消息字段
   reasoning?: string;
@@ -152,6 +180,13 @@ type ChatMessage = {
   provider?: string;
   model?: string;
   actionBusy?: boolean;
+  contextUsage?: ContextUsage;
+  pendingAction?: {
+    type: string;
+    title: string;
+    summary?: string;
+    payload?: Record<string, unknown>;
+  };
 
   // GEO 流程字段
   knowledgeDraft?: GeoAgentKnowledgeDraft;
@@ -176,6 +211,16 @@ type ChatMessage = {
   };
   articleDraft?: GeoAgentGeoArticleDraft;
   supportArticles?: GeoAgentGeoSupportArticleRunResponse;
+  additionalArticles?: {
+    geo_project_id: string;
+    enterprise_project_id: string;
+    platform: string;
+    status: string;
+    drafts: GeoAgentGeoArticleDraft[];
+    total: number;
+    count?: number;
+    error_message?: string | null;
+  };
   supportArticlesPrompt?: GeoAgentGeoSourceDiscovery;
   articleDraftAttempts?: Partial<Record<'consulting' | 'review', boolean>>;
   confirmationState?: 'approval-requested' | 'approval-responded' | 'output-available';
@@ -603,12 +648,21 @@ function generateSuggestions(context: {
   isKnowledgeSkillSelected: boolean;
   workflowState?: GeoAgentWorkflowState | null;
   geoProject?: GeoAgentGeoProject | null;
-}): Array<{ label: string; value: string; icon?: React.ComponentType<{ className?: string }>; variant?: 'default' | 'secondary' | 'outline' }> {
-  const suggestions: Array<{ label: string; value: string; icon?: React.ComponentType<{ className?: string }>; variant?: 'default' | 'secondary' | 'outline' }> = [];
+}): ChatSuggestion[] {
+  const suggestions: ChatSuggestion[] = [];
 
   // 如果用户已选择知识库技能，不显示建议
   if (context.isKnowledgeSkillSelected) {
     return suggestions;
+  }
+
+  const stageFourStatus = context.workflowState?.platforms[AUTO_PLATFORM]?.stages.stage_4?.status;
+  if (context.hasEnterprise && stageFourStatus === 'completed') {
+    return [
+      { label: '再生成 1 篇排行榜稿', value: '再生成 1 篇排行榜稿', actionType: 'send_message', icon: FileText, variant: 'default' },
+      { label: '生成 3 篇支撑稿', value: '再生成 3 篇支撑稿', actionType: 'send_message', icon: Plus, variant: 'secondary' },
+      { label: '前往稿件管理校对', value: 'drafts', actionType: 'navigate', payload: { view: 'drafts' }, icon: Check, variant: 'outline' },
+    ];
   }
 
   // 场景 1：用户表明创建知识库意图但没有文件，引导上传文件
@@ -652,7 +706,7 @@ function generateSuggestions(context: {
   if (/知识库|企业资料|公司介绍|公司信息/.test(lowerContent)) {
     suggestions.push(
       { label: '查看知识库', value: '请查看当前企业知识库的完整内容。', icon: Database, variant: 'default' },
-      { label: '补充知识库', value: '请检查知识库还有哪些缺失项。', icon: Plus, variant: 'secondary' }
+      { label: '生成待确认知识库更新', value: '请根据刚才的内容生成待确认知识库更新。', actionType: 'propose_action', icon: Plus, variant: 'secondary' }
     );
   }
 
@@ -924,6 +978,7 @@ export function AgentStudio() {
   const [configStatus, setConfigStatus] = useState<ConfigStatus | null>(null);
   const [geoProject, setGeoProject] = useState<GeoAgentGeoProject | null>(null);
   const [workflowState, setWorkflowState] = useState<GeoAgentWorkflowState | null>(null);
+  const [latestContextUsage, setLatestContextUsage] = useState<ContextUsage | null>(null);
   const [supplementDraftDialog, setSupplementDraftDialog] = useState<{
     messageId: string;
     draft: GeoAgentKnowledgeDraft;
@@ -1659,6 +1714,9 @@ export function AgentStudio() {
             if (event.type === 'meta' && event.conversation_id) {
               setConversationId(event.conversation_id);
               localStorage.setItem(conversationStorageKey(activeProjectId, event.conversation_id), event.conversation_id);
+              if (event.context_usage) {
+                setLatestContextUsage(event.context_usage as ContextUsage);
+              }
             }
             if (event.type === 'status' && event.message) {
               setMessages((current) => updateMessage(current, assistantId, {
@@ -1695,8 +1753,13 @@ export function AgentStudio() {
               }));
             }
             if (event.type === 'done') {
-              // 生成建议
-              const suggestions = generateSuggestions({
+              if (event.context_usage) {
+                setLatestContextUsage(event.context_usage as ContextUsage);
+              }
+              const eventSuggestions = Array.isArray(event.suggestions)
+                ? event.suggestions as ChatSuggestion[]
+                : [];
+              const suggestions = eventSuggestions.length > 0 ? eventSuggestions : generateSuggestions({
                 hasFiles,
                 knowledgeIntent,
                 messageContent: rawContent,
@@ -1714,11 +1777,13 @@ export function AgentStudio() {
                 searchQueries: event.search_queries ?? [],
                 searchActions: event.search_actions ?? [],
                 searchUsage: event.search_usage ?? {},
+                additionalArticles: event.additional_articles as ChatMessage['additionalArticles'],
                 reasoningContent: shouldShowReasoning
                   ? message.reasoningContent || event.reasoning_content || undefined
                   : undefined,
                 provider: event.provider,
                 model: event.model,
+                contextUsage: event.context_usage as ContextUsage | undefined,
                 error: event.error,
                 reasoning: shouldShowReasoning ? `${hasFiles && knowledgeIntent !== 'chat' ? `已解析 ${files.length} 个附件并写入企业知识库。` : ''}${buildAssistantReasoning(event.provider, event.model, {
                   deepThinking: shouldShowReasoning,
@@ -1731,6 +1796,9 @@ export function AgentStudio() {
             }
           }
         );
+        if (finalEvent.context_usage) {
+          setLatestContextUsage(finalEvent.context_usage as ContextUsage);
+        }
         setConversationId(finalEvent.conversation_id);
         localStorage.setItem(conversationStorageKey(activeProjectId, finalEvent.conversation_id), finalEvent.conversation_id);
         window.dispatchEvent(new CustomEvent('geo-agent-conversation-changed', { detail: { id: finalEvent.conversation_id } }));
@@ -1796,6 +1864,22 @@ export function AgentStudio() {
 
   const setSuggestedPrompt = (suggestion: string) => {
     setInputValue(suggestion);
+  };
+
+  const handleSuggestionSelect = (suggestion: ChatSuggestion) => {
+    const actionType = suggestion.actionType || 'send_message';
+    if (actionType === 'navigate') {
+      const view = String(suggestion.payload?.view || suggestion.value || '');
+      if (view) {
+        window.dispatchEvent(new CustomEvent('geo-agent-open-view', { detail: { view } }));
+      }
+      return;
+    }
+    if (actionType === 'propose_action') {
+      setInputValue(suggestion.value);
+      return;
+    }
+    sendMessage(suggestion.value);
   };
 
   const appendPhaseTwoPrompt = async (project: GeoAgentGeoProject, options?: { force?: boolean; platform?: 'doubao' | 'deepseek'; conversationId?: string | null }) => {
@@ -2606,6 +2690,7 @@ export function AgentStudio() {
               key={message.id}
               message={message}
               setInputValue={setInputValue}
+              onSuggestionSelect={handleSuggestionSelect}
               onConfirmDraft={confirmKnowledgeDraft}
               onConfirmPhaseTwo={confirmPhaseTwo}
               onContinueKnowledgeDraft={continueKnowledgeDraftInput}
@@ -2742,6 +2827,38 @@ export function AgentStudio() {
             </PromptInputTools>
 
             <div className="flex items-center gap-2.5">
+              {latestContextUsage && (
+                <Context
+                  maxTokens={latestContextUsage.maxTokens}
+                  modelId={latestContextUsage.modelId}
+                  usedTokens={latestContextUsage.usedTokens}
+                  usage={{
+                    inputTokens: latestContextUsage.inputTokens,
+                    outputTokens: latestContextUsage.outputTokens,
+                    reasoningTokens: latestContextUsage.reasoningTokens,
+                    cacheTokens: latestContextUsage.cacheTokens,
+                  }}
+                >
+                  <ContextTrigger
+                    className="text-[#6f6b64] hover:bg-[#eeeeeb] hover:text-[#34322e] dark:text-[#b6b6b6] dark:hover:bg-[#2d2d2d] dark:hover:text-[#f1f1f1]"
+                    title="上下文用量"
+                  />
+                  <ContextContent>
+                    <ContextContentHeader>
+                      <ContextUsageSummary />
+                    </ContextContentHeader>
+                    <ContextContentBody>
+                      <ContextInputUsage />
+                      <ContextOutputUsage />
+                      <ContextReasoningUsage />
+                      <ContextCacheUsage />
+                    </ContextContentBody>
+                    <ContextContentFooter>
+                      仅显示最近一次模型请求的估算上下文用量。
+                    </ContextContentFooter>
+                  </ContextContent>
+                </Context>
+              )}
               <div className="flex items-center gap-1 rounded-2xl bg-transparent px-2.5 py-1 font-sans text-[11px] font-semibold uppercase tracking-[0.18em] text-[#6f6b64] dark:text-[#b6b6b6]" title="Task policy chooses model and network mode automatically">
                 Auto
               </div>
@@ -2900,6 +3017,7 @@ const AttachmentAwareSubmit: React.FC<{
 const ChatBubble: React.FC<{
   message: ChatMessage;
   setInputValue: (value: string) => void;
+  onSuggestionSelect: (suggestion: ChatSuggestion) => void;
   onContinueKnowledgeDraft: (messageId: string, draft: GeoAgentKnowledgeDraft) => void;
   onConfirmDraft: (messageId: string, draft: GeoAgentKnowledgeDraft) => void;
   onConfirmPhaseTwo: (messageId: string, project: GeoAgentGeoProject, platform?: 'doubao' | 'deepseek') => void;
@@ -2909,7 +3027,7 @@ const ChatBubble: React.FC<{
   onRunSourceDiscovery: (messageId: string, report: GeoAgentGeoReport) => void;
   runningStageKeys: Set<string>;
   workflowState: GeoAgentWorkflowState | null;
-}> = ({ message, setInputValue, onContinueKnowledgeDraft, onConfirmDraft, onConfirmPhaseTwo, onConfirmSupportArticles, onRequestSupportArticles, onRunArticleDraft, onRunSourceDiscovery, runningStageKeys, workflowState }) => {
+}> = ({ message, setInputValue, onSuggestionSelect, onContinueKnowledgeDraft, onConfirmDraft, onConfirmPhaseTwo, onConfirmSupportArticles, onRequestSupportArticles, onRunArticleDraft, onRunSourceDiscovery, runningStageKeys, workflowState }) => {
   const nextAction = getNextWorkflowAction(workflowState, message, runningStageKeys);
   if (message.role === 'user') {
     // 检查消息是否包含附件信息
@@ -3069,6 +3187,13 @@ const ChatBubble: React.FC<{
         {message.supportArticles && (
           <SupportArticlesCard
             result={message.supportArticles}
+            onSuggestionSelect={onSuggestionSelect}
+          />
+        )}
+        {message.additionalArticles && (
+          <AdditionalArticlesCard
+            result={message.additionalArticles}
+            onSuggestionSelect={onSuggestionSelect}
           />
         )}
         {message.content && (
@@ -3085,11 +3210,7 @@ const ChatBubble: React.FC<{
               <Suggestion
                 key={suggestion.label}
                 suggestion={suggestion.value}
-                onClick={(value) => {
-                  if (value) {
-                    setInputValue(value);
-                  }
-                }}
+                onClick={() => onSuggestionSelect(suggestion)}
               >
                 {suggestion.icon && <suggestion.icon className="size-4 shrink-0" />}
                 <span>{suggestion.label}</span>
@@ -3712,7 +3833,8 @@ const ArticleDraftCard: React.FC<{ draft: GeoAgentGeoArticleDraft }> = ({ draft 
 
 const SupportArticlesCard: React.FC<{
   result: GeoAgentGeoSupportArticleRunResponse;
-}> = ({ result }) => {
+  onSuggestionSelect: (suggestion: ChatSuggestion) => void;
+}> = ({ result, onSuggestionSelect }) => {
   const supportDrafts = Array.isArray(result.support_drafts) ? result.support_drafts : [];
   const rankingDrafts = Array.isArray(result.ranking_drafts) ? result.ranking_drafts : [];
   const allDrafts = [...supportDrafts, ...rankingDrafts];
@@ -3726,6 +3848,31 @@ const SupportArticlesCard: React.FC<{
         <p className="mt-2 text-[13px] leading-relaxed text-on-surface-variant">
           已生成 9 篇内容资产，可前往稿件管理校对、AI 改稿、OSS 预览和投递。
         </p>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          className="h-8 rounded-full px-3 text-[12px]"
+          onClick={() => onSuggestionSelect({ label: '继续生成 1 篇', value: '继续生成 1 篇文章', actionType: 'send_message' })}
+          type="button"
+          variant="outline"
+        >
+          继续生成 1 篇
+        </Button>
+        <Button
+          className="h-8 rounded-full px-3 text-[12px]"
+          onClick={() => onSuggestionSelect({ label: '生成 3 篇支撑稿', value: '再生成 3 篇支撑稿', actionType: 'send_message' })}
+          type="button"
+          variant="outline"
+        >
+          生成 3 篇支撑稿
+        </Button>
+        <Button
+          className="h-8 rounded-full px-3 text-[12px]"
+          onClick={() => onSuggestionSelect({ label: '前往稿件管理', value: 'drafts', actionType: 'navigate', payload: { view: 'drafts' } })}
+          type="button"
+        >
+          前往稿件管理
+        </Button>
       </div>
       <div className="grid gap-3 md:grid-cols-2">
         <SupportArticleSummaryCard draft={result.consulting_draft ?? null} label="企业/品牌支撑文章" />
@@ -3751,6 +3898,55 @@ const SupportArticlesCard: React.FC<{
           {result.error_message}
         </div>
       )}
+    </div>
+  );
+};
+
+const AdditionalArticlesCard: React.FC<{
+  result: NonNullable<ChatMessage['additionalArticles']>;
+  onSuggestionSelect: (suggestion: ChatSuggestion) => void;
+}> = ({ result, onSuggestionSelect }) => {
+  const drafts = Array.isArray(result.drafts) ? result.drafts : [];
+  return (
+    <div className="mb-5 space-y-4 border-b border-outline-variant/20 pb-5">
+      <div>
+        <div className="flex items-center gap-2 text-[14px] font-bold text-primary">
+          <FileText className="size-4 text-secondary" />
+          已追加生成 {drafts.length || result.total || 0} 篇完整稿件
+        </div>
+        <p className="mt-2 text-[13px] leading-relaxed text-on-surface-variant">
+          新稿件已保存为草稿，可在稿件管理继续校对、AI 改稿、生成 OSS 预览和投递。
+        </p>
+      </div>
+      {drafts.length > 0 && (
+        <div className="grid gap-2 rounded-2xl bg-white/50 p-4 text-[12px] leading-relaxed text-on-surface-variant dark:bg-[#1f1f1f]/70">
+          {drafts.map((draft) => (
+            <div key={draft.id} className="rounded-xl bg-[#faf9f7] px-3 py-2 dark:bg-[#161616]">
+              <div className="font-semibold text-[#2f2f2f] dark:text-[#f1f1f1]">{draft.draft.title || '未命名草稿'}</div>
+              <div className="mt-1">
+                {draft.draft.article_role === 'ranking' ? '排行榜文章' : '支撑文章'} · {draft.draft.article_theme || draft.article_type}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="flex flex-wrap gap-2">
+        <Button
+          className="h-8 rounded-full px-3 text-[12px]"
+          onClick={() => onSuggestionSelect({ label: '再生成 1 篇排行榜稿', value: '再生成 1 篇排行榜稿', actionType: 'send_message' })}
+          type="button"
+          variant="outline"
+        >
+          再生成 1 篇排行榜稿
+        </Button>
+        <Button
+          className="h-8 rounded-full px-3 text-[12px]"
+          onClick={() => onSuggestionSelect({ label: '前往稿件管理', value: 'drafts', actionType: 'navigate', payload: { view: 'drafts' } })}
+          type="button"
+        >
+          前往稿件管理
+        </Button>
+      </div>
     </div>
   );
 };
@@ -4256,6 +4452,21 @@ function restoreConversationMessage(message: GeoAgentConversationMessage): ChatM
       confirmationApproved: typeof metadata.confirmation_approved === 'boolean'
         ? metadata.confirmation_approved
         : undefined,
+      status: metadata.status === 'failed' ? 'error' : 'complete',
+    };
+  }
+
+  if (message.role === 'assistant' && metadata.type === 'geo_additional_articles') {
+    return {
+      ...baseMessage,
+      content: message.content,
+      additionalArticles: metadata.additional_articles as ChatMessage['additionalArticles'],
+      confirmationState: typeof metadata.confirmation_state === 'string'
+        ? metadata.confirmation_state as ChatMessage['confirmationState']
+        : 'output-available',
+      confirmationApproved: typeof metadata.confirmation_approved === 'boolean'
+        ? metadata.confirmation_approved
+        : true,
       status: metadata.status === 'failed' ? 'error' : 'complete',
     };
   }
