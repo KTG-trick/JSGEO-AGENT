@@ -1303,10 +1303,19 @@ export function AgentStudio() {
       }
     }
 
+    // 构建用户消息内容（包含附件信息）
+    let userMessageContent = content;
+    if (userAttachments && userAttachments.length > 0) {
+      const attachmentInfo = userAttachments
+        .map((att, i) => `\n\n[附件 ${i + 1} - ${att.filename}]`)
+        .join('');
+      userMessageContent = `${content}${attachmentInfo}`;
+    }
+
     const userMessage: ChatMessage = {
       id: `user-${timestamp}`,
       role: 'user',
-      content,
+      content: userMessageContent,
       attachmentIds: userAttachments?.map((att) => att.id),
     };
     const assistantId = `assistant-${timestamp}`;
