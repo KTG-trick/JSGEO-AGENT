@@ -573,11 +573,13 @@ declare global {
       project_id: string;
       geo_project_id: string;
       platform: string;
+      scope?: 'global' | 'enterprise';
       rule_type: string;
       content: string;
       evidence_count: number;
       confidence: number;
       status: string;
+      target_stages?: string;
       metadata?: Record<string, unknown> | null;
       created_at: string;
       updated_at: string;

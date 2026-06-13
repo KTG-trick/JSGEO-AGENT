@@ -320,6 +320,11 @@ export function AutoLearning() {
                             {rule.platform}
                           </span>
                         )}
+                        {rule.scope === 'global' && (
+                          <span className="inline-flex rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-bold text-blue-700 dark:bg-blue-950/40 dark:text-blue-200">
+                            全局
+                          </span>
+                        )}
                       </div>
                       <span className="text-[10px] text-on-surface-variant whitespace-nowrap">
                         {rule.created_at ? new Date(rule.created_at).toLocaleDateString('zh-CN') : ''}
@@ -333,6 +338,19 @@ export function AutoLearning() {
                       <div className="flex items-center gap-4 text-[11px] text-on-surface-variant">
                         <span>置信度 {Math.round(rule.confidence * 100)}%</span>
                         <span>证据 {rule.evidence_count} 条</span>
+                        {rule.target_stages && (() => {
+                          try {
+                            const stages = JSON.parse(rule.target_stages);
+                            if (stages.length > 0) {
+                              return (
+                                <span className="text-[11px] text-on-surface-variant">
+                                  作用阶段：{stages.map((s: number) => `阶段${s}`).join('、')}
+                                </span>
+                              );
+                            }
+                          } catch { /* ignore parse errors */ }
+                          return null;
+                        })()}
                       </div>
                       {rule.status === 'pending' && (
                         <div className="flex items-center gap-2">
