@@ -25,6 +25,7 @@ const { fieldText } = require('./services/profileFieldService.cjs');
 const llmGateway = require('./services/llmGateway.cjs');
 const contextWindowService = require('./services/contextWindowService.cjs');
 const agentRuntimeService = require('./services/agentRuntimeService.cjs');
+const ruleService = require('./services/ruleService.cjs');
 
 const rootDir = path.resolve(__dirname, '..', '..');
 const isDev = !app.isPackaged;
@@ -2102,6 +2103,14 @@ function registerHandlers() {
 
   ipcMain.handle('geo-agent:list-evolution-rules', async (_event, projectId, filters = {}) => {
     return reflectionService.listEvolutionRules(projectId, filters);
+  });
+
+  ipcMain.handle('geo-agent:get-rules-for-stage', async (_event, projectId, stage, platform) => {
+    return ruleService.getRulesForStage(projectId, stage, platform);
+  });
+
+  ipcMain.handle('geo-agent:get-global-rules', async (_event, platform) => {
+    return ruleService.getGlobalRules(platform);
   });
 
   ipcMain.handle('geo-agent:get-auto-learning-status', async () => {

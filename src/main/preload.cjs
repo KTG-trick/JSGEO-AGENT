@@ -199,4 +199,6 @@ contextBridge.exposeInMainWorld('geoAgent', {
   reindexKnowledge: (projectId) => ipcRenderer.invoke('geo-agent:reindex-knowledge', projectId),
   getKnowledgeIndexStatus: (projectId) => ipcRenderer.invoke('geo-agent:get-knowledge-index-status', projectId),
   getSkills: () => ipcRenderer.invoke('geo-agent:get-skills'),
+  getRulesForStage: (projectId, stage, platform) => ipcRenderer.invoke('geo-agent:get-rules-for-stage', projectId, stage, platform),
+  getGlobalRules: (platform) => ipcRenderer.invoke('geo-agent:get-global-rules', platform),
 });

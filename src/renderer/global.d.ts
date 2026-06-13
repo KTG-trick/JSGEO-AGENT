@@ -65,6 +65,21 @@ declare global {
     updated_at: string;
   };
 
+  interface GeoAgentRule {
+    id: string;
+    project_id: string | null;
+    scope: 'global' | 'enterprise';
+    platform: string | null;
+    rule_type: string;
+    content: string;
+    evidence_count: number;
+    confidence: number;
+    status: string;
+    target_stages: string;
+    created_at: string;
+    updated_at: string;
+  }
+
   type GeoAgentKnowledgeIndexStatus = {
     project_id?: string | null;
     embedding_model: string;
@@ -1254,6 +1269,8 @@ declare global {
         channel: string;
       }>;
       setAutoLearningInterval: (intervalMs: number) => Promise<boolean>;
+      getRulesForStage: (projectId: string, stage: number, platform: string) => Promise<GeoAgentRule[]>;
+      getGlobalRules: (platform: string) => Promise<GeoAgentRule[]>;
     };
   }
 }
