@@ -693,6 +693,29 @@ function migrateSchema(database) {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+
+  // 规则系统扩展：evolution_rules 新增 scope 和 target_stages 字段
+  const erColumns = database.prepare('PRAGMA table_info(evolution_rules)').all();
+  const erExisting = new Set(erColumns.map((c) => c.name));
+  if (!erExisting.has('scope')) {
+    database.exec("ALTER TABLE evolution_rules ADD COLUMN scope TEXT NOT NULL DEFAULT 'enterprise'");
+  }
+  if (!erExisting.has('target_stages')) {
+    database.exec("ALTER TABLE evolution_rules ADD COLUMN target_stages TEXT NOT NULL DEFAULT '[]'");
+  }
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS idx_evolution_rules_scope_stages
+      ON evolution_rules(scope, status, target_stages);
+  `);
+
+  // 全局规则处理状态表
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS global_rule_state (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
 }
 
 module.exports = {
