@@ -166,6 +166,12 @@ contextBridge.exposeInMainWorld('geoAgent', {
   confirmEvolutionRule: (ruleId) => ipcRenderer.invoke('geo-agent:confirm-evolution-rule', ruleId),
   rejectEvolutionRule: (ruleId) => ipcRenderer.invoke('geo-agent:reject-evolution-rule', ruleId),
   listEvolutionRules: (projectId, filters) => ipcRenderer.invoke('geo-agent:list-evolution-rules', projectId, filters || {}),
+  // 自动学习调度
+  getAutoLearningStatus: () => ipcRenderer.invoke('geo-agent:get-auto-learning-status'),
+  triggerAutoLearningNow: () => {
+    return invokeStream('geo-agent:trigger-auto-learning-now', {});
+  },
+  setAutoLearningInterval: (intervalMs) => ipcRenderer.invoke('geo-agent:set-auto-learning-interval', { intervalMs }),
   getConversations: (projectId, limit) => ipcRenderer.invoke('geo-agent:get-conversations', { projectId: projectId || null, limit }),
   getRecoverableDraftConversations: (limit) => ipcRenderer.invoke('geo-agent:get-recoverable-draft-conversations', { limit }),
   getPublicConversations: (limit) => ipcRenderer.invoke('geo-agent:get-public-conversations', { limit }),
