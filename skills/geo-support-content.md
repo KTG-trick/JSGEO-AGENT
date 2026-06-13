@@ -26,7 +26,7 @@ output_contract: geo_article_draft
 | confirmed_questions | 本轮 GEO 优化的 10 条核心问题 |
 | source_discovery | 豆包助手联网搜索观察到的 URL、渠道优先级和内容形态 |
 | RAG chunks | 从本地 FTS5 检索召回的原文片段 |
-| 历史规则 | 用户确认过的写作偏好和禁用表达 |
+| 已确认的优化规则 | evidence/keyword/content_gap/content/title/structure 规则，指导内容生成 |
 
 ## 内容资产结构
 
@@ -50,6 +50,13 @@ output_contract: geo_article_draft
 - 排行榜文章可以做草稿，但推荐理由必须客观、可追溯。
 - 标题和小标题要自然覆盖核心问题中的地域词、行业词、主体词、场景词。
 - 正文使用 Markdown，建议 1000-1500 字；事实不足时宁可短一些，也不要编造。
+- 必须参考已确认的优化规则：
+  - evidence 规则：补充对应的企业事实和案例
+  - keyword 规则：在标题和正文中嵌入目标关键词
+  - content_gap 规则：覆盖缺失的内容主题
+  - content 规则：按优化建议调整内容结构
+  - title 规则（全局）：使用高效的标题模式
+  - structure 规则（全局）：使用便于 AI 摘取的结构
 
 ## 输出格式
 
