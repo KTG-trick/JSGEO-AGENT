@@ -4,6 +4,7 @@ const { streamLLM, parseJsonContent } = require('./llmGateway.cjs');
 const { getTaskPolicy } = require('./modelPolicyService.cjs');
 const { getSkill } = require('./skillService.cjs');
 const { fieldText } = require('./profileFieldService.cjs');
+const ruleService = require('./ruleService.cjs');
 
 function nowIso() {
   return new Date().toISOString();
@@ -37,20 +38,8 @@ function getEnterpriseProfile(projectId) {
   return row ? parseJson(row.profile_json, {}) : null;
 }
 
-function getEvolutionRules(projectId, platform) {
-  const db = getDb();
-  const rows = db.prepare(`
-    SELECT * FROM evolution_rules
-    WHERE project_id = ? AND status = 'approved'
-    AND (platform = ? OR platform IS NULL)
-  `).all(projectId, platform);
-
-  return rows.map((row) => ({
-    id: row.id,
-    content: row.content,
-    rule_type: row.rule_type,
-    confidence: row.confidence,
-  }));
+function getEvolutionRules(projectId, platform, stage = 2) {
+  return ruleService.getRulesForStage(projectId, stage, platform);
 }
 
 function buildQuestionPoolMessages({ profile, platform, evolutionRules }) {
