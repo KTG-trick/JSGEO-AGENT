@@ -85,8 +85,10 @@ export function AutoLearning() {
   const [reflectionProgress, setReflectionProgress] = useState<string | null>(null);
   const [isCheckingVisibility, setIsCheckingVisibility] = useState(false);
   const [publishedCount, setPublishedCount] = useState(0);
-  const autoCheckRef = useRef(false);
   const autoReflectionRef = useRef<string | null>(null);
+  const [schedulerStatus, setSchedulerStatus] = useState<GeoAgentAutoLearningStatus | null>(null);
+  const [isTriggeringManual, setIsTriggeringManual] = useState(false);
+  const [manualProgress, setManualProgress] = useState<string | null>(null);
 
   const loadRules = useCallback(async () => {
     if (!currentEnterpriseId || !window.geoAgent?.listEvolutionRules) {
@@ -108,6 +110,14 @@ export function AutoLearning() {
       if (window.geoAgent.getLatestVisibilityCheck) {
         const latest = await window.geoAgent.getLatestVisibilityCheck(`geo-${currentEnterpriseId}`, 'doubao');
         setVisibilityCheck(latest);
+      }
+      if (window.geoAgent?.getAutoLearningStatus) {
+        try {
+          const status = await window.geoAgent.getAutoLearningStatus();
+          setSchedulerStatus(status);
+        } catch {
+          // 静默失败，不影响主流程
+        }
       }
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError));
@@ -205,23 +215,24 @@ export function AutoLearning() {
     }
   }, [currentEnterpriseId, maybeRunReflection, visibilityCheck]);
 
-  useEffect(() => {
-    if (!currentEnterpriseId || publishedCount === 0 || isCheckingVisibility) return;
-    const shouldRun = () => {
-      const latestAt = checkTime(visibilityCheck);
-      return !latestAt || Date.now() - latestAt >= VISIBILITY_CHECK_INTERVAL_MS;
-    };
-    const runIfNeeded = () => {
-      if (autoCheckRef.current || !shouldRun()) return;
-      autoCheckRef.current = true;
-      runVisibilityCheck('auto').finally(() => {
-        autoCheckRef.current = false;
-      });
-    };
-    runIfNeeded();
-    const timer = window.setInterval(runIfNeeded, VISIBILITY_CHECK_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, [currentEnterpriseId, isCheckingVisibility, publishedCount, runVisibilityCheck, visibilityCheck]);
+  const triggerManualCycle = async () => {
+    if (!window.geoAgent?.triggerAutoLearningNow || isTriggeringManual) return;
+    setIsTriggeringManual(true);
+    setManualProgress('正在执行自动学习周期...');
+    setError(null);
+    try {
+      await window.geoAgent.triggerAutoLearningNow();
+      setManualProgress('自动学习周期已启动，请等待完成。');
+      // 刷新数据
+      await loadRules();
+      setManualProgress('自动学习周期已完成');
+    } catch (err) {
+      setManualProgress('执行失败');
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsTriggeringManual(false);
+    }
+  };
 
   if (isLoadingEnterprises) {
     return (
@@ -365,6 +376,76 @@ export function AutoLearning() {
 
         {/* 右栏: 反思面板 */}
         <div className="xl:col-span-5 flex flex-col gap-5">
+          {/* 调度状态卡片 */}
+          <div className="rounded-xl border border-outline-variant/40 bg-surface p-5">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-on-surface">自动学习调度</h3>
+              <span className={cn(
+                "inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium",
+                schedulerStatus?.isRunning
+                  ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200"
+                  : "bg-surface-container text-on-surface-variant"
+              )}>
+                <span className={cn(
+                  "w-1.5 h-1.5 rounded-full",
+                  schedulerStatus?.isRunning ? "bg-emerald-500 animate-pulse" : "bg-on-surface-variant/40"
+                )} />
+                {schedulerStatus?.isRunning ? '执行中' : '等待中'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 text-xs text-on-surface-variant">
+              <div>
+                <span className="block text-on-surface-variant/60 mb-0.5">上次执行</span>
+                <span className="text-on-surface font-medium">
+                  {schedulerStatus?.lastRunAt
+                    ? new Date(schedulerStatus.lastRunAt).toLocaleString('zh-CN')
+                    : '尚未执行'}
+                </span>
+              </div>
+              <div>
+                <span className="block text-on-surface-variant/60 mb-0.5">下次执行</span>
+                <span className="text-on-surface font-medium">
+                  {schedulerStatus?.nextRunAt
+                    ? new Date(schedulerStatus.nextRunAt).toLocaleString('zh-CN')
+                    : '--'}
+                </span>
+              </div>
+              <div>
+                <span className="block text-on-surface-variant/60 mb-0.5">执行间隔</span>
+                <span className="text-on-surface font-medium">
+                  {schedulerStatus?.intervalMs
+                    ? `${Math.round(schedulerStatus.intervalMs / 1000 / 60)} 分钟`
+                    : '12 小时'}
+                </span>
+              </div>
+              <div className="flex items-end">
+                <button
+                  onClick={triggerManualCycle}
+                  disabled={isTriggeringManual}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors",
+                    "bg-primary text-on-primary hover:bg-primary/90",
+                    "disabled:opacity-50 disabled:cursor-not-allowed"
+                  )}
+                >
+                  {isTriggeringManual ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-3 h-3" />
+                  )}
+                  {isTriggeringManual ? '执行中...' : '立即执行'}
+                </button>
+              </div>
+            </div>
+
+            {manualProgress && (
+              <p className="mt-3 text-xs text-on-surface-variant bg-surface-container rounded-lg p-2">
+                {manualProgress}
+              </p>
+            )}
+          </div>
+
           <div className="rounded-xl border border-outline-variant/40 bg-surface p-5 flex flex-col gap-5">
             <div className="flex items-center gap-3 pb-3 border-b border-outline-variant/20">
               <Sparkles className="size-5 text-secondary" />
