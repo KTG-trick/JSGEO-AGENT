@@ -57,7 +57,15 @@ function articleRole(draft: GeoAgentGeoArticleDraft) {
 function canPublishRanking(drafts: GeoAgentGeoArticleDraft[]) {
   const supportDrafts = drafts.filter((draft) => articleRole(draft) === 'support');
   const ready = supportDrafts.filter((draft) => ['reviewed', 'published'].includes(publishStatus(draft)));
-  return supportDrafts.length >= 6 && ready.length >= 6;
+  // 已发布支撑稿 >= 6 篇时，排行榜配额不限制
+  if (ready.length >= 6) return true;
+  // 已发布支撑稿 < 6 篇时，需要有剩余配额（已发布排行榜 < 已发布支撑稿）
+  const publishedRanking = drafts.filter((draft) => {
+    const role = articleRole(draft);
+    const status = publishStatus(draft);
+    return role === 'ranking' && ['publishing', 'published'].includes(status);
+  }).length;
+  return publishedRanking < ready.length;
 }
 
 function statusLabel(status: string) {
@@ -119,6 +127,15 @@ export function Drafts() {
 
   useEffect(() => {
     loadDrafts();
+  }, [loadDrafts]);
+
+  // 监听稿件生成完成事件，自动刷新列表
+  useEffect(() => {
+    const handleDraftsChanged = () => {
+      loadDrafts();
+    };
+    window.addEventListener('geo-agent-geo-project-changed', handleDraftsChanged);
+    return () => window.removeEventListener('geo-agent-geo-project-changed', handleDraftsChanged);
   }, [loadDrafts]);
 
   const rankingReady = useMemo(() => canPublishRanking(drafts), [drafts]);
@@ -260,13 +277,23 @@ export function Drafts() {
     }
   };
 
+  // 计算可发布的稿件数量（排除已发布、发布中、已归档）
+  const getPublishableDraftCount = useCallback((role: 'support' | 'ranking') => {
+    return drafts.filter((d) => {
+      const draftRole = text(d.draft?.article_role);
+      const roleMatch = draftRole === role || (!draftRole && d.article_type?.includes(role));
+      const status = text(d.draft?.publication_evidence?.status || d.status);
+      const statusMatch = !['published', 'publishing', 'archived'].includes(status);
+      return roleMatch && statusMatch;
+    }).length;
+  }, [drafts]);
+
+  const publishableDraftCount = useMemo(() => getPublishableDraftCount('support'), [getPublishableDraftCount]);
+
   const handleAutoPublish = async (role: 'support' | 'ranking') => {
     if (!currentEnterpriseId || !window.geoAgent?.autoPublishArticles) return;
 
-    const draftCount = drafts.filter((d) => {
-      const draftRole = text(d.draft?.article_role);
-      return draftRole === role || (!draftRole && d.article_type?.includes(role));
-    }).length;
+    const draftCount = getPublishableDraftCount(role);
 
     if (draftCount === 0) {
       setError(`没有待发布的${role === 'ranking' ? '排行榜' : '支撑'}稿件。`);
@@ -363,7 +390,7 @@ export function Drafts() {
           </button>
           <button
             className="inline-flex items-center gap-2 rounded-md border border-primary/20 bg-primary px-3 py-2 text-[11px] font-bold text-on-primary transition-all duration-200 hover:bg-primary/90 hover:shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-            disabled={isAutoPublishing}
+            disabled={isAutoPublishing || publishableDraftCount === 0}
             onClick={() => handleAutoPublish('support')}
             type="button"
           >

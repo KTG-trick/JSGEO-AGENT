@@ -291,11 +291,14 @@ async function markArticleReviewed(articleId) {
 
 /**
  * 计算排行榜发布配额
- * 规则：每发布 1 篇支撑稿 → 可发布 1 篇排行榜稿
- * @returns {{ allowed: number, published: number, remaining: number }}
- *   allowed - 允许发布的排行榜总数（= 已校对/已发布的支撑稿数）
+ * 规则：
+ *   - 已发布支撑稿 < 6 篇时：排行榜配额 = 已发布支撑稿数量
+ *   - 已发布支撑稿 >= 6 篇时：排行榜配额不受限制
+ * @returns {{ allowed: number, published: number, remaining: number, isUnlimited: boolean }}
+ *   allowed - 允许发布的排行榜总数（< 6 时 = 已发布支撑稿数，>= 6 时 = Infinity）
  *   published - 已提交或已发布的排行榜稿数（已占配额）
- *   remaining - 剩余可发布配额
+ *   remaining - 剩余可发布配额（>= 6 时 = Infinity）
+ *   isUnlimited - 是否为无限配额模式
  */
 function getRankedPublishQuota(projectId, platform) {
   // 统计已校对/已发布的支撑稿数量 → 允许发布的排行榜数量
@@ -312,8 +315,15 @@ function getRankedPublishQuota(projectId, platform) {
     return ['publishing', 'published'].includes(s);
   }).length;
 
-  const allowed = publishedSupport;
-  return { allowed, published: submittedRanking, remaining: Math.max(0, allowed - submittedRanking) };
+  // 配额规则：
+  // - 已发布支撑稿 < 6 篇时：排行榜配额 = 已发布支撑稿数量
+  // - 已发布支撑稿 >= 6 篇时：排行榜配额不受限制
+  const UNLIMITED_THRESHOLD = 6;
+  const isUnlimited = publishedSupport >= UNLIMITED_THRESHOLD;
+  const allowed = isUnlimited ? Infinity : publishedSupport;
+  const remaining = isUnlimited ? Infinity : Math.max(0, allowed - submittedRanking);
+
+  return { allowed, published: submittedRanking, remaining, isUnlimited };
 }
 
 function supportPublishingReady(projectId, platform) {
@@ -420,9 +430,7 @@ async function publishArticle(articleId, adapterId = 'external_api_pending', opt
     const quota = getRankedPublishQuota(draft.enterprise_project_id, draft.platform);
     if (quota.remaining <= 0) {
       throw new Error(
-        quota.published >= 3
-          ? '排行榜稿件已达上限（3篇），无法继续发布。'
-          : `当前已发布 ${quota.published} 篇支撑稿，可发布 ${quota.allowed} 篇排行榜稿，已全部投递。请先发布更多支撑稿。`
+        `当前已发布 ${quota.published} 篇支撑稿，可发布 ${quota.isUnlimited ? '无限' : quota.allowed} 篇排行榜稿，已全部投递。请先发布更多支撑稿。`
       );
     }
   }
