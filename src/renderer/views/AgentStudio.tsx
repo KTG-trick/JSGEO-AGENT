@@ -114,6 +114,7 @@ import { profileFieldText, toProfileEvidenceField } from '../lib/profileFields';
 import { PROFILE_FIELD_DEFINITIONS } from '../lib/profileSchema';
 import { TooltipProvider } from '../components/ui/tooltip';
 import { useEnterprise } from '../context/EnterpriseContext';
+import * as knowledgeIntent from '../../shared/knowledgeIntent.js';
 
 type SourceCitation = GeoAgentSourceCitation;
 type SearchAction = GeoAgentSearchAction;
@@ -123,6 +124,10 @@ type PromptAttachment = {
   mediaType?: string;
   url?: string;
   type?: string;
+};
+
+const { inferKnowledgeIntent } = knowledgeIntent as {
+  inferKnowledgeIntent: (text: string, hasFiles: boolean, isKnowledgeSkill: boolean) => 'create' | 'update' | 'chat';
 };
 
 type ContextUsage = {
@@ -642,31 +647,6 @@ function slugifyProjectId(value: string) {
     .replace(/^-+|-+$/g, '')
     .slice(0, 48);
   return normalized || 'enterprise';
-}
-
-function inferKnowledgeIntent(text: string, hasFiles: boolean, isKnowledgeSkill: boolean) {
-  const normalized = text.toLowerCase();
-
-  // 明确的知识库创建意图关键词
-  const createIntentKeywords = /新建|创建|建立|录入|新增|另建|从零|知识库|企业资料|公司资料|企业介绍|构建.*库|搭建.*库|整理.*资料|整理.*文档/;
-
-  // 明确的知识库更新意图关键词
-  const updateIntentKeywords = /补充|更新|编辑|修改|追加|完善|修正|加入|写入|保存到|更新.*知识库|补充.*资料|追加.*内容/;
-
-  // 选择知识库技能时，保持原有逻辑不变
-  const wantsCreate = isKnowledgeSkill || createIntentKeywords.test(text);
-  const wantsUpdate = updateIntentKeywords.test(text);
-
-  if (wantsCreate && !wantsUpdate) {
-    return 'create' as const;
-  }
-  if (wantsUpdate) {
-    return 'update' as const;
-  }
-
-  // 关键修改：有附件但没有明确意图时，返回 'chat' 而不是 'create'
-  // 这样用户上传文件后可以进行普通对话，而不是强制进入知识库流程
-  return 'chat' as const;
 }
 
 function generateSuggestions(context: {
@@ -1333,7 +1313,7 @@ export function AgentStudio() {
     const recoverableProjectId = canReuseDraftConversation && conversationProjectId && conversationProjectId !== currentEnterprise?.id
       ? conversationProjectId
       : null;
-    const shouldStartSeparateKnowledgeConversation = knowledgeIntent === 'create' && !recoverableProjectId;
+    const shouldStartSeparateKnowledgeConversation = false;
     const content = rawContent
       || (hasFiles && knowledgeIntent !== 'chat' ? `已上传 ${files.length} 个附件，请解析并写入企业知识库。` : '')
       || (hasFiles && knowledgeIntent === 'chat' ? `我上传了 ${files.length} 个文件，请帮我分析。` : '')
@@ -1434,9 +1414,7 @@ export function AgentStudio() {
         throw new Error('请在 Electron 桌面模式中使用本地 GEO-Agent 后端。');
       }
 
-      let activeProjectId = knowledgeIntent === 'create'
-        ? recoverableProjectId || undefined
-        : hasEnterprises ? currentEnterprise.id : undefined;
+      let activeProjectId = recoverableProjectId || (hasEnterprises ? currentEnterprise.id : undefined);
 
       // 判断是否应该进入知识库创建/更新流程
       const shouldEnterKnowledgeFlow = isKnowledgeIngestSkill
@@ -1465,7 +1443,7 @@ export function AgentStudio() {
         const assets = await Promise.all(files.map(filePartToKnowledgeAsset));
         const draftPayload = {
           message: content,
-          conversation_id: knowledgeIntent === 'create' && !recoverableProjectId ? null : conversationId,
+          conversation_id: conversationId,
           intent: knowledgeIntent,
           project_id: activeProjectId,
           reuse_draft_project: knowledgeIntent === 'create' && Boolean(recoverableProjectId),
