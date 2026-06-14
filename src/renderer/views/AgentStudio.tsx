@@ -144,8 +144,14 @@ type ContextUsage = {
 type ChatSuggestion = {
   label: string;
   value: string;
-  actionType?: 'send_message' | 'propose_action' | 'navigate';
-  payload?: Record<string, unknown>;
+  actionType?: 'send_message' | 'propose_action' | 'navigate' | 'run_tool';
+  payload?: {
+    toolName?: string;
+    attachmentIds?: string[];
+    input?: Record<string, unknown>;
+    view?: string;
+    [key: string]: unknown;
+  };
   icon?: React.ComponentType<{ className?: string }>;
   variant?: 'default' | 'secondary' | 'outline';
 };
@@ -629,6 +635,33 @@ async function filePartToKnowledgeAsset(file: PromptAttachment) {
   };
 }
 
+async function attachmentIdsToKnowledgeAssets(attachmentIds: string[]) {
+  const uniqueIds = Array.from(new Set(attachmentIds.filter(Boolean)));
+  const assets: GeoAgentKnowledgeDraftAssetInput[] = [];
+  const missingOriginals: string[] = [];
+  for (const id of uniqueIds) {
+    const attachment = await window.geoAgent?.getChatAttachment?.(id);
+    if (!attachment) {
+      continue;
+    }
+    const contentBase64 = String((attachment as { content_base64?: string | null }).content_base64 || '');
+    const assetStatus = String((attachment as { asset_status?: string | null }).asset_status || '');
+    if (!contentBase64 || assetStatus !== 'original_available') {
+      missingOriginals.push(attachment.filename || '未知附件');
+      continue;
+    }
+    assets.push({
+      filename: attachment.filename || '未命名附件',
+      content_type: attachment.mime_type || null,
+      content_base64: dataUrlToBase64(contentBase64),
+    });
+  }
+  if (missingOriginals.length > 0 && assets.length === 0) {
+    throw new Error(`当前历史附件仅保存了文本预览，无法直接创建知识库。请重新上传原文件：${missingOriginals.join('、')}`);
+  }
+  return assets;
+}
+
 function normalizeChatError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error || '');
   if (message.includes('No handler registered') && message.includes('create-knowledge-asset')) {
@@ -657,6 +690,7 @@ function generateSuggestions(context: {
   isKnowledgeSkillSelected: boolean;
   workflowState?: GeoAgentWorkflowState | null;
   geoProject?: GeoAgentGeoProject | null;
+  attachmentIds?: string[];
 }): ChatSuggestion[] {
   const suggestions: ChatSuggestion[] = [];
 
@@ -693,7 +727,14 @@ function generateSuggestions(context: {
   // 场景 3：上传文件后，没有明确知识库意图
   if (context.hasFiles && context.knowledgeIntent === 'chat') {
     suggestions.push(
-      { label: '建立知识库', value: '我想建立企业知识库，请帮我分析这些文件并生成草稿。', icon: Database, variant: 'default' },
+      {
+        label: '建立知识库',
+        value: '我想建立企业知识库，请帮我分析这些文件并生成草稿。',
+        actionType: 'run_tool',
+        payload: { toolName: 'create_knowledge_draft', attachmentIds: context.attachmentIds || [] },
+        icon: Database,
+        variant: 'default',
+      },
       { label: '分析文件内容', value: '请详细分析我上传的文件内容，告诉我主要信息。', icon: FileText, variant: 'secondary' }
     );
     return suggestions;
@@ -1300,7 +1341,11 @@ export function AgentStudio() {
     };
   }, []);
 
-  const sendMessage = async (text?: string, files: PromptAttachment[] = []) => {
+  const sendMessage = async (
+    text?: string,
+    files: PromptAttachment[] = [],
+    options: { forcedToolName?: string; attachmentIds?: string[] } = {}
+  ) => {
     const knowledgeSkill = skills.find((skill) => skill.id === 'knowledge-base-ingest' || skill.name.includes('知识库'));
     // 只有当用户主动选择知识库技能时才激活，不再自动选择
     // 这样用户可以在没有企业知识库的情况下进行普通对话
@@ -1308,8 +1353,18 @@ export function AgentStudio() {
     const isKnowledgeIngestSkill = !!activeSkill && (activeSkill.id === 'knowledge-base-ingest' || activeSkill.name.includes('知识库'));
     const hasFiles = files.length > 0;
     const rawContent = (text ?? inputValue).trim();
-    const knowledgeIntent = inferKnowledgeIntent(rawContent, hasFiles, isKnowledgeIngestSkill);
-    const shouldUseDispatcher = (hasFiles && knowledgeIntent !== 'chat') || isKnowledgeIngestSkill;
+    const forcedCreateKnowledgeDraft = options.forcedToolName === 'create_knowledge_draft';
+    const knowledgeIntent = forcedCreateKnowledgeDraft
+      ? 'create'
+      : inferKnowledgeIntent(rawContent, hasFiles, isKnowledgeIngestSkill);
+    const previousAttachmentIds = messages
+      .filter((msg) => msg.role === 'user' && msg.attachmentIds && msg.attachmentIds.length > 0)
+      .flatMap((msg) => msg.attachmentIds || []);
+    const referencedAttachmentIds = options.attachmentIds?.length
+      ? options.attachmentIds
+      : (!hasFiles && knowledgeIntent !== 'chat' ? previousAttachmentIds.slice(-3) : []);
+    const hasReferencedAttachments = referencedAttachmentIds.length > 0;
+    const shouldUseDispatcher = (hasFiles && knowledgeIntent !== 'chat') || hasReferencedAttachments || isKnowledgeIngestSkill || forcedCreateKnowledgeDraft;
     const recoverableProjectId = canReuseDraftConversation && conversationProjectId && conversationProjectId !== currentEnterprise?.id
       ? conversationProjectId
       : null;
@@ -1352,9 +1407,12 @@ export function AgentStudio() {
           // 上传附件到后端持久化存储
           const result = await window.geoAgent.uploadChatAttachment({
             projectId: currentEnterprise?.id,
+            conversationId,
             filename,
             mimeType: asset.content_type,
             content,
+            contentBase64: asset.content_base64,
+            assetStatus: 'original_available',
           });
 
           userAttachments.push({
@@ -1381,7 +1439,7 @@ export function AgentStudio() {
       id: `user-${timestamp}`,
       role: 'user',
       content: userMessageContent,
-      attachmentIds: userAttachments?.map((att) => att.id),
+      attachmentIds: userAttachments?.map((att) => att.id) || referencedAttachmentIds,
     };
     const assistantId = `assistant-${timestamp}`;
     const assistantMessage: ChatMessage = {
@@ -1418,12 +1476,12 @@ export function AgentStudio() {
 
       // 判断是否应该进入知识库创建/更新流程
       const shouldEnterKnowledgeFlow = isKnowledgeIngestSkill
-        || (knowledgeIntent === 'create' && hasFiles)
-        || (knowledgeIntent === 'update' && hasFiles)
+        || (knowledgeIntent === 'create' && (hasFiles || hasReferencedAttachments))
+        || (knowledgeIntent === 'update' && (hasFiles || hasReferencedAttachments))
         || (hasFiles && knowledgeIntent !== 'chat');
 
       // 如果用户表明创建知识库意图但没有文件，显示引导信息
-      if ((knowledgeIntent === 'create' || knowledgeIntent === 'update') && !hasFiles) {
+      if ((knowledgeIntent === 'create' || knowledgeIntent === 'update') && !hasFiles && !hasReferencedAttachments) {
         const guidanceMessage = knowledgeIntent === 'create'
           ? '好的，我来帮您建立企业知识库。请先上传企业资料文件（如公司介绍、产品服务、用户痛点、信任背书、案例、业务区域、目标关键词等），支持 Word、PDF、Markdown 等格式。上传后我会自动解析并生成知识库草稿。'
           : '好的，我来帮您更新企业知识库。请先上传需要补充的资料文件，上传后我会自动解析并更新知识库。';
@@ -1440,7 +1498,9 @@ export function AgentStudio() {
         if (!window.geoAgent.createKnowledgeDraft && !window.geoAgent.createKnowledgeDraftStream) {
           throw new Error('Knowledge draft API is not available. Please restart Electron and try again.');
         }
-        const assets = await Promise.all(files.map(filePartToKnowledgeAsset));
+        const assets = hasFiles
+          ? await Promise.all(files.map(filePartToKnowledgeAsset))
+          : await attachmentIdsToKnowledgeAssets(referencedAttachmentIds);
         const draftPayload = {
           message: content,
           conversation_id: conversationId,
@@ -1462,12 +1522,6 @@ export function AgentStudio() {
               setCanReuseDraftConversation(false);
               localStorage.setItem(conversationStorageKey(event.project_id || draftPayload.project_id || null, event.conversation_id), event.conversation_id);
               window.dispatchEvent(new CustomEvent('geo-agent-conversation-changed', { detail: { id: event.conversation_id } }));
-              if (knowledgeIntent === 'create') {
-                setMessages((current) => {
-                  const currentAssistant = current.find((message) => message.id === assistantId) || assistantMessage;
-                  return [userMessage, currentAssistant];
-                });
-              }
             }
             if (event.type === 'status' && event.message) {
               enqueueKnowledgeTask(async () => {
@@ -1633,7 +1687,7 @@ export function AgentStudio() {
         setMessages((current) => updateMessage(current, draftMessageId, (message) => ({
           ...message,
           content: message.knowledgeDraft || draft ? '' : '已根据资料生成企业知识库草稿。请先核对下方模板内容，确认前不会写入正式知识库。',
-          reasoning: `已解析 ${files.length} 个附件并生成结构化知识库草稿。确认前不会写入正式知识库。`,
+          reasoning: `已解析 ${assets.length} 个附件并生成结构化知识库草稿。确认前不会写入正式知识库。`,
           knowledgeDraft: draft,
           progressiveDraftGroups: message.progressiveDraftGroups ?? DRAFT_PREVIEW_GROUPS.length,
           confirmationState: 'approval-requested',
@@ -1652,9 +1706,10 @@ export function AgentStudio() {
         );
       }
 
-      const options = {
+      const chatOptions = {
         projectId: activeProjectId,
         skillId: activeSkill?.id,
+        attachmentIds: userAttachments?.map((att) => att.id) || referencedAttachmentIds,
       };
 
       // 如果有附件且是普通聊天，将文件内容摘要包含在消息中
@@ -1717,7 +1772,7 @@ export function AgentStudio() {
         const finalEvent = await window.geoAgent.sendChatStream(
           messageToSend,
           conversationId,
-          options,
+          chatOptions,
           (event) => {
             if (event.type === 'meta' && event.conversation_id) {
               setConversationId(event.conversation_id);
@@ -1773,7 +1828,7 @@ export function AgentStudio() {
               const eventSuggestions = Array.isArray(event.suggestions)
                 ? event.suggestions as ChatSuggestion[]
                 : [];
-              const suggestions = eventSuggestions.length > 0 ? eventSuggestions : generateSuggestions({
+              const localSuggestions = generateSuggestions({
                 hasFiles,
                 knowledgeIntent,
                 messageContent: rawContent,
@@ -1781,7 +1836,11 @@ export function AgentStudio() {
                 isKnowledgeSkillSelected: !!selectedSkill,
                 workflowState,
                 geoProject,
+                attachmentIds: userAttachments?.map((att) => att.id) || referencedAttachmentIds,
               });
+              const suggestions = hasFiles && knowledgeIntent === 'chat'
+                ? localSuggestions
+                : eventSuggestions.length > 0 ? eventSuggestions : localSuggestions;
 
               setMessages((current) => updateMessage(current, assistantId, (message) => ({
                 ...message,
@@ -1804,7 +1863,7 @@ export function AgentStudio() {
                 traceSummary: event.traceSummary as AgentTraceSummary | undefined,
                 pendingAction: event.pending_action,
                 error: event.error,
-                reasoning: shouldShowReasoning ? `${hasFiles && knowledgeIntent !== 'chat' ? `已解析 ${files.length} 个附件并写入企业知识库。` : ''}${buildAssistantReasoning(event.provider, event.model, {
+                reasoning: shouldShowReasoning ? `${knowledgeIntent !== 'chat' && (hasFiles || hasReferencedAttachments) ? `已解析 ${hasFiles ? files.length : referencedAttachmentIds.length} 个附件并写入企业知识库。` : ''}${buildAssistantReasoning(event.provider, event.model, {
                   deepThinking: shouldShowReasoning,
                   webSearch: false,
                   dispatcher: shouldUseDispatcher,
@@ -1825,10 +1884,10 @@ export function AgentStudio() {
         localStorage.setItem(conversationStorageKey(activeProjectId, finalEvent.conversation_id), finalEvent.conversation_id);
         window.dispatchEvent(new CustomEvent('geo-agent-conversation-changed', { detail: { id: finalEvent.conversation_id } }));
       } else {
-        const response = await window.geoAgent.sendChat(messageToSend, conversationId, options);
+        const response = await window.geoAgent.sendChat(messageToSend, conversationId, chatOptions);
         setConversationId(response.conversation_id);
         localStorage.setItem(conversationStorageKey(activeProjectId, response.conversation_id), response.conversation_id);
-        const finalReasoning = shouldShowReasoning ? `${hasFiles && knowledgeIntent !== 'chat' ? `已解析 ${files.length} 个附件并写入企业知识库。` : ''}${buildAssistantReasoning(response.provider, response.model, {
+        const finalReasoning = shouldShowReasoning ? `${knowledgeIntent !== 'chat' && (hasFiles || hasReferencedAttachments) ? `已解析 ${hasFiles ? files.length : referencedAttachmentIds.length} 个附件并写入企业知识库。` : ''}${buildAssistantReasoning(response.provider, response.model, {
           deepThinking: shouldShowReasoning,
           webSearch: false,
           dispatcher: shouldUseDispatcher,
@@ -1861,6 +1920,7 @@ export function AgentStudio() {
           isKnowledgeSkillSelected: !!selectedSkill,
           workflowState,
           geoProject,
+          attachmentIds: userAttachments?.map((att) => att.id) || referencedAttachmentIds,
         });
 
         setMessages((current) => updateMessage(current, assistantId, {
@@ -1900,6 +1960,20 @@ export function AgentStudio() {
     if (actionType === 'propose_action') {
       setInputValue(suggestion.value);
       return;
+    }
+    if (actionType === 'run_tool') {
+      const toolName = suggestion.payload?.toolName;
+      if (toolName === 'create_knowledge_draft') {
+        const fallbackAttachmentIds = messages
+          .filter((msg) => msg.role === 'user' && msg.attachmentIds && msg.attachmentIds.length > 0)
+          .flatMap((msg) => msg.attachmentIds || [])
+          .slice(-3);
+        const attachmentIds = Array.isArray(suggestion.payload?.attachmentIds) && suggestion.payload.attachmentIds.length > 0
+          ? suggestion.payload.attachmentIds
+          : fallbackAttachmentIds;
+        sendMessage(suggestion.value, [], { forcedToolName: 'create_knowledge_draft', attachmentIds });
+        return;
+      }
     }
     sendMessage(suggestion.value);
   };
@@ -4691,6 +4765,7 @@ function restoreConversationMessage(message: GeoAgentConversationMessage): ChatM
   return {
     ...baseMessage,
     content: message.content,
+    attachmentIds: Array.isArray(metadata.attachment_ids) ? metadata.attachment_ids as string[] : undefined,
   };
 }
 

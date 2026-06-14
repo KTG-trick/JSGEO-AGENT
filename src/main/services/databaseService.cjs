@@ -196,6 +196,9 @@ function createSchema(database) {
       file_size INTEGER DEFAULT 0,
       content TEXT,
       content_preview TEXT,
+      content_base64 TEXT,
+      asset_status TEXT DEFAULT 'text_only',
+      source_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
       created_at TEXT NOT NULL
     );
 
@@ -513,6 +516,18 @@ function migrateSchema(database) {
   }
   if (!draftExisting.has('error_message')) {
     database.exec('ALTER TABLE knowledge_drafts ADD COLUMN error_message TEXT');
+  }
+
+  const attachmentColumns = database.prepare('PRAGMA table_info(chat_attachments)').all();
+  const attachmentExisting = new Set(attachmentColumns.map((column) => column.name));
+  if (!attachmentExisting.has('content_base64')) {
+    database.exec('ALTER TABLE chat_attachments ADD COLUMN content_base64 TEXT');
+  }
+  if (!attachmentExisting.has('asset_status')) {
+    database.exec("ALTER TABLE chat_attachments ADD COLUMN asset_status TEXT DEFAULT 'text_only'");
+  }
+  if (!attachmentExisting.has('source_message_id')) {
+    database.exec('ALTER TABLE chat_attachments ADD COLUMN source_message_id TEXT REFERENCES messages(id) ON DELETE SET NULL');
   }
 
   database.exec(`

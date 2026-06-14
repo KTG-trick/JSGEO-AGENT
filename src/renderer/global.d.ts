@@ -662,6 +662,7 @@ declare global {
         options?: {
           projectId?: string;
           skillId?: string;
+          attachmentIds?: string[];
         }
       ) => Promise<{
         role: string;
@@ -682,6 +683,7 @@ declare global {
         options: {
           projectId?: string;
           skillId?: string;
+          attachmentIds?: string[];
         },
         onEvent: (event: {
           type: 'meta' | 'status' | 'delta' | 'reasoning_delta' | 'search' | 'done' | 'error';
@@ -723,7 +725,7 @@ declare global {
           suggestions?: Array<{
             label: string;
             value: string;
-            actionType?: 'send_message' | 'propose_action' | 'navigate';
+            actionType?: 'send_message' | 'propose_action' | 'navigate' | 'run_tool';
             payload?: Record<string, unknown>;
           }>;
           pending_action?: {
@@ -774,7 +776,7 @@ declare global {
         suggestions?: Array<{
           label: string;
           value: string;
-          actionType?: 'send_message' | 'propose_action' | 'navigate';
+          actionType?: 'send_message' | 'propose_action' | 'navigate' | 'run_tool';
           payload?: Record<string, unknown>;
         }>;
         additional_articles?: unknown;
@@ -828,7 +830,7 @@ declare global {
           suggestions?: Array<{
             label: string;
             value: string;
-            actionType?: 'send_message' | 'propose_action' | 'navigate';
+            actionType?: 'send_message' | 'propose_action' | 'navigate' | 'run_tool';
             payload?: Record<string, unknown>;
           }>;
           pending_action?: {
@@ -1112,12 +1114,15 @@ declare global {
         filename: string;
         mimeType?: string | null;
         content: string;
+        contentBase64?: string | null;
+        assetStatus?: 'original_available' | 'text_only' | 'missing_original';
       }) => Promise<{
         id: string;
         filename: string;
         mimeType: string | null;
         fileSize: number;
         contentPreview: string;
+        assetStatus?: string;
       }>;
       getChatAttachment: (attachmentId: string) => Promise<{
         id: string;
@@ -1129,6 +1134,9 @@ declare global {
         file_size: number;
         content: string | null;
         content_preview: string | null;
+        content_base64?: string | null;
+        asset_status?: string | null;
+        source_message_id?: string | null;
         created_at: string;
       } | null>;
       getChatAttachmentContent: (attachmentId: string) => Promise<string | null>;

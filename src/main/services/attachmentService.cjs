@@ -22,19 +22,24 @@ const { getDb } = require('./databaseService.cjs');
  * @param {string} options.content - 解析后的文本内容
  * @returns {Object} 附件信息
  */
-function uploadAttachment({ projectId, conversationId, messageId, filename, mimeType, content }) {
+function uploadAttachment({ projectId, conversationId, messageId, filename, mimeType, content, contentBase64, assetStatus, sourceMessageId }) {
   const id = crypto.randomUUID();
   const contentPreview = content && content.length > 500
     ? content.substring(0, 500) + '...'
     : content || '';
-  const fileSize = content ? Buffer.byteLength(content, 'utf8') : 0;
+  const normalizedBase64 = contentBase64 ? String(contentBase64).replace(/^data:[^,]+,/, '') : null;
+  const fileSize = normalizedBase64
+    ? Buffer.byteLength(normalizedBase64, 'base64')
+    : content ? Buffer.byteLength(content, 'utf8') : 0;
+  const nextAssetStatus = assetStatus || (normalizedBase64 ? 'original_available' : 'text_only');
 
   getDb().prepare(`
     INSERT INTO chat_attachments (
       id, project_id, conversation_id, message_id,
       filename, mime_type, file_size, content, content_preview,
+      content_base64, asset_status, source_message_id,
       created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     projectId || null,
@@ -45,6 +50,9 @@ function uploadAttachment({ projectId, conversationId, messageId, filename, mime
     fileSize,
     content || null,
     contentPreview,
+    normalizedBase64,
+    nextAssetStatus,
+    sourceMessageId || messageId || null,
     new Date().toISOString()
   );
 
@@ -54,6 +62,7 @@ function uploadAttachment({ projectId, conversationId, messageId, filename, mime
     mimeType,
     fileSize,
     contentPreview,
+    assetStatus: nextAssetStatus,
   };
 }
 
@@ -125,8 +134,19 @@ function getAttachmentsForProject(projectId) {
  */
 function linkToMessage(attachmentId, messageId) {
   getDb().prepare(`
-    UPDATE chat_attachments SET message_id = ? WHERE id = ?
-  `).run(messageId, attachmentId);
+    UPDATE chat_attachments SET message_id = ?, source_message_id = COALESCE(source_message_id, ?) WHERE id = ?
+  `).run(messageId, messageId, attachmentId);
+}
+
+function linkManyToMessage(attachmentIds = [], messageId) {
+  if (!messageId || !Array.isArray(attachmentIds) || attachmentIds.length === 0) return;
+  const update = getDb().prepare(`
+    UPDATE chat_attachments SET message_id = ?, source_message_id = COALESCE(source_message_id, ?) WHERE id = ?
+  `);
+  const transaction = getDb().transaction((ids) => {
+    ids.forEach((id) => update.run(messageId, messageId, id));
+  });
+  transaction(attachmentIds);
 }
 
 /**
@@ -138,6 +158,17 @@ function linkToConversation(attachmentId, conversationId) {
   getDb().prepare(`
     UPDATE chat_attachments SET conversation_id = ? WHERE id = ?
   `).run(conversationId, attachmentId);
+}
+
+function linkManyToConversation(attachmentIds = [], conversationId) {
+  if (!conversationId || !Array.isArray(attachmentIds) || attachmentIds.length === 0) return;
+  const update = getDb().prepare(`
+    UPDATE chat_attachments SET conversation_id = ? WHERE id = ?
+  `);
+  const transaction = getDb().transaction((ids) => {
+    ids.forEach((id) => update.run(conversationId, id));
+  });
+  transaction(attachmentIds);
 }
 
 /**
@@ -193,7 +224,9 @@ module.exports = {
   getAttachmentsForConversation,
   getAttachmentsForProject,
   linkToMessage,
+  linkManyToMessage,
   linkToConversation,
+  linkManyToConversation,
   deleteAttachment,
   deleteAttachmentsForMessage,
   deleteAttachmentsForConversation,

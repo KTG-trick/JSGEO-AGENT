@@ -26,6 +26,7 @@ const llmGateway = require('./services/llmGateway.cjs');
 const contextWindowService = require('./services/contextWindowService.cjs');
 const agentRuntimeService = require('./services/agentRuntimeService.cjs');
 const ruleService = require('./services/ruleService.cjs');
+const attachmentService = require('./services/attachmentService.cjs');
 
 const rootDir = path.resolve(__dirname, '..', '..');
 const isDev = !app.isPackaged;
@@ -618,11 +619,6 @@ function registerHandlers() {
       && conversationService.canReuseDraftConversationForCreate(payload.conversation_id);
     if (isCreateIntent) {
       payload.reuse_draft_project = Boolean(canReuseDraftConversation);
-      if (!canReuseDraftConversation) {
-        payload.conversation_id = null;
-        payload.project_id = null;
-        payload.projectId = null;
-      }
     }
     const context = prepareKnowledgeDraftContext(payload);
     const projectId = context.projectId;
@@ -633,9 +629,7 @@ function registerHandlers() {
     try {
       if (true) {
         // 尝试复用最近的 geo_workflow 会话；没有则创建新的会话。
-        let effectiveConversationId = isCreateIntent
-          ? (canReuseDraftConversation ? payload.conversation_id : null)
-          : payload.conversation_id || null;
+        let effectiveConversationId = payload.conversation_id || null;
         if (!effectiveConversationId && projectId && !isCreateIntent) {
           const latest = conversationService.findLatestConversation(projectId, 'geo_workflow');
           if (latest) {
@@ -880,18 +874,25 @@ function registerHandlers() {
       ? payloadOrMessage
       : { message: payloadOrMessage, conversation_id: conversationId, selected_model: selectedModel };
     const projectId = payload.project_id || payload.projectId;
+    const attachmentIds = Array.isArray(payload.attachment_ids)
+      ? payload.attachment_ids.filter(Boolean)
+      : Array.isArray(payload.attachmentIds)
+        ? payload.attachmentIds.filter(Boolean)
+        : [];
     const conversation = conversationService.ensureConversation({
       projectId,
       conversationId: payload.conversation_id || null,
       firstMessage: payload.message,
     });
-    conversationService.addMessage({
+    const userMessage = conversationService.addMessage({
       conversationId: conversation.id,
       projectId,
       role: 'user',
       content: payload.message || '',
-      metadata: { type: 'chat_user' },
+      metadata: { type: 'chat_user', attachment_ids: attachmentIds },
     });
+    attachmentService.linkManyToConversation(attachmentIds, conversation.id);
+    attachmentService.linkManyToMessage(attachmentIds, userMessage.id);
     const assistantContent = '新的 Electron-only 服务层正在重建中。当前已接入本地企业数据库、知识库草稿、文档解析、FTS 基础索引和聊天历史；普通 RAG 聊天能力会在后续阶段接入。';
     conversationService.addMessage({
       conversationId: conversation.id,
@@ -1229,8 +1230,6 @@ function registerHandlers() {
     conversationService.deleteConversation(conversationId));
 
   // 附件管理 IPC handlers
-  const attachmentService = require('./services/attachmentService.cjs');
-
   ipcMain.handle('geo-agent:upload-chat-attachment', async (_event, payload = {}) => {
     return attachmentService.uploadAttachment({
       projectId: payload.projectId,
@@ -1239,6 +1238,9 @@ function registerHandlers() {
       filename: payload.filename,
       mimeType: payload.mimeType,
       content: payload.content,
+      contentBase64: payload.contentBase64 || payload.content_base64,
+      assetStatus: payload.assetStatus || payload.asset_status,
+      sourceMessageId: payload.sourceMessageId || payload.source_message_id,
     });
   });
 

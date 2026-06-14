@@ -137,7 +137,24 @@ function pendingActionSummary(projectId) {
   }).join('\n');
 }
 
-function buildSystemPrompt(projectId, conversationSummary = '') {
+function attachmentSummary(conversationId) {
+  if (!conversationId) return '';
+  const rows = getDb().prepare(`
+    SELECT filename, mime_type, asset_status, content_preview, created_at
+    FROM chat_attachments
+    WHERE conversation_id = ?
+    ORDER BY datetime(created_at) DESC
+    LIMIT 5
+  `).all(conversationId);
+  if (!rows.length) return '';
+  return rows.map((row) => {
+    const status = row.asset_status === 'original_available' ? '可用于建库' : '仅有文本预览';
+    const preview = row.content_preview ? ` - ${previewText(row.content_preview, 180)}` : '';
+    return `${row.filename || '附件'} (${row.mime_type || 'unknown'}, ${status})${preview}`;
+  }).join('\n');
+}
+
+function buildSystemPrompt(projectId, conversationSummary = '', recentAttachments = '') {
   const sections = [
     '你是 GEO-Agent Studio 的工作流智能助手。请用中文回答。',
     '你不是泛聊天机器人：回答要围绕当前企业知识库、GEO 阶段、稿件和用户最近意图推进工作。',
@@ -152,6 +169,7 @@ function buildSystemPrompt(projectId, conversationSummary = '') {
   const pendingActions = pendingActionSummary(projectId);
   if (pendingActions) sections.push(`[待确认动作]\n${pendingActions}`);
   if (conversationSummary) sections.push(`[历史会话摘要]\n${conversationSummary}`);
+  if (recentAttachments) sections.push(`[最近会话附件]\n${recentAttachments}`);
   return sections.join('\n\n');
 }
 
@@ -203,7 +221,8 @@ async function buildContextPack(conversationId, projectId, options = {}) {
 
   const historyBudget = Math.max(1000, Math.floor(maxTokens * 0.7));
   const recentMessages = truncateMessages(messages, historyBudget, recentMessageCount);
-  const systemPrompt = buildSystemPrompt(projectId, conversationSummary);
+  const recentAttachments = attachmentSummary(conversationId);
+  const systemPrompt = buildSystemPrompt(projectId, conversationSummary, recentAttachments);
   const systemTokens = estimateTokens(systemPrompt);
   const historyTokens = recentMessages.reduce((sum, message) => sum + estimateTokens(message.content), 0);
   const total = systemTokens + historyTokens;
@@ -214,6 +233,7 @@ async function buildContextPack(conversationId, projectId, options = {}) {
     pendingActions: pendingActionSummary(projectId),
     conversationSummary,
     retrievedEvidence: '',
+    recentAttachments,
     recentMessages,
     systemPrompt,
     modelMessages: [

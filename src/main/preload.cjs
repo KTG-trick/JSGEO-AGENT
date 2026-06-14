@@ -53,6 +53,7 @@ contextBridge.exposeInMainWorld('geoAgent', {
       selected_model: selectedModel,
       skill_id: options.skillId,
       project_id: options.projectId,
+      attachment_ids: options.attachmentIds || options.attachment_ids,
     };
 
     return new Promise((resolve, reject) => {
@@ -96,6 +97,7 @@ contextBridge.exposeInMainWorld('geoAgent', {
       selected_model: selectedModel,
       skill_id: options.skillId,
       project_id: options.projectId,
+      attachment_ids: options.attachmentIds || options.attachment_ids,
     });
   },
   // 附件管理

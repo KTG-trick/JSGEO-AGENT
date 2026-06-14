@@ -3,6 +3,7 @@ const contextWindowService = require('./contextWindowService.cjs');
 const llmGateway = require('./llmGateway.cjs');
 const articleDraftService = require('./articleDraftService.cjs');
 const knowledgeService = require('./knowledgeService.cjs');
+const attachmentService = require('./attachmentService.cjs');
 const traceService = require('./agentTraceService.cjs');
 const { getDb } = require('./databaseService.cjs');
 const { getTaskPolicy } = require('./modelPolicyService.cjs');
@@ -748,18 +749,25 @@ function resolveIntent(payload = {}) {
 
 async function runChatStream({ payload = {}, sender, channel }) {
   const projectId = payload.project_id || payload.projectId || null;
+  const attachmentIds = Array.isArray(payload.attachment_ids)
+    ? payload.attachment_ids.filter(Boolean)
+    : Array.isArray(payload.attachmentIds)
+      ? payload.attachmentIds.filter(Boolean)
+      : [];
   const conversation = conversationService.ensureConversation({
     projectId,
     conversationId: payload.conversation_id || null,
     firstMessage: payload.message,
   });
-  conversationService.addMessage({
+  const userMessage = conversationService.addMessage({
     conversationId: conversation.id,
     projectId,
     role: 'user',
     content: payload.message || '',
-    metadata: { type: 'chat_user' },
+    metadata: { type: 'chat_user', attachment_ids: attachmentIds },
   });
+  attachmentService.linkManyToConversation(attachmentIds, conversation.id);
+  attachmentService.linkManyToMessage(attachmentIds, userMessage.id);
 
   const { intent, toolName, input } = resolveIntent(payload);
   const runStartedAt = Date.now();
