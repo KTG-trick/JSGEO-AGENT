@@ -63,14 +63,29 @@ function stripJsonCodeFence(content) {
   return fenced ? fenced[1].trim() : text;
 }
 
+/**
+ * 将 JSON 字符串字面量中未转义的控制字符（U+0000–U+001F）替换为合法转义。
+ * 部分模型会在 JSON 字符串里直接输出字面量换行/制表符，导致 JSON.parse 失败。
+ */
+function sanitizeJsonControlCharacters(text) {
+  if (!text || typeof text !== 'string') return text;
+  return text.replace(/"(?:\\.|[^"\\])*"/g, (match) => {
+    return match.replace(/[\x00-\x1f]/g, (char) => {
+      const escapes = { '\b': '\\b', '\t': '\\t', '\n': '\\n', '\f': '\\f', '\r': '\\r' };
+      return escapes[char] || `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`;
+    });
+  });
+}
+
 function parseJsonContent(content) {
-  const stripped = stripJsonCodeFence(content);
+  const stripped = sanitizeJsonControlCharacters(stripJsonCodeFence(content));
   try {
     return JSON.parse(stripped);
   } catch {
     const balanced = firstBalancedJsonObject(stripped);
     if (balanced) {
-      return JSON.parse(balanced);
+      const sanitized = sanitizeJsonControlCharacters(balanced);
+      return JSON.parse(sanitized);
     }
     throw new Error('模型返回内容不是合法 JSON，请检查 Responses 输出格式。');
   }
@@ -209,6 +224,8 @@ async function chatCompletionStream({
   forceNoResponseFormat = false,
   taskType = 'chat_completion',
   onEvent = null,
+  signal = null,
+  onRetry = null,
 }) {
   const config = getProviderConfig(provider, model);
   if (!config.apiKey) throw new Error('未配置模型 API Key。');
@@ -247,7 +264,9 @@ async function chatCompletionStream({
     body: JSON.stringify(requestBody),
   }, {
     timeout: 60000,
-    maxRetries: 2,
+    maxRetries: 3,
+    signal,
+    onRetry,
   });
 
   onEvent?.({
@@ -287,6 +306,8 @@ async function chatCompletionStream({
         forceNoResponseFormat: true,
         taskType,
         onEvent,
+        signal,
+        onRetry,
       });
     }
     const errorMessage = `模型流式调用失败：HTTP ${response.status}${body ? ` ${body.slice(0, 300)}` : ''}`;
@@ -518,7 +539,7 @@ function parseSseLines(buffer) {
       .join('\n');
     if (!data || data === '[DONE]') return;
     try {
-      events.push(JSON.parse(data));
+      events.push(JSON.parse(sanitizeJsonControlCharacters(data)));
     } catch {
       events.push({ type: 'raw', data });
     }
@@ -567,6 +588,8 @@ async function responsesStream({
   networkMode = NETWORK_MODES.NONE,
   deepThinking = false,
   onEvent = null,
+  signal = null,
+  onRetry = null,
 } = {}) {
   const config = getProviderConfig(provider, model);
   if (!config.apiKey) throw new Error('未配置 Responses API Key。');
@@ -611,7 +634,9 @@ async function responsesStream({
     body: JSON.stringify(body),
   }, {
     timeout: 60000,
-    maxRetries: 2,
+    maxRetries: 3,
+    signal,
+    onRetry,
   });
 
   onEvent?.({
@@ -749,6 +774,8 @@ async function streamLLM({
   forceNoResponseFormat = false,
   apiFamily = null,
   onEvent = null,
+  signal = null,
+  onRetry = null,
 } = {}) {
   const resolvedApiFamily = apiFamily || API_FAMILIES.RESPONSES;
 
@@ -762,6 +789,8 @@ async function streamLLM({
       forceNoResponseFormat,
       taskType,
       onEvent,
+      signal,
+      onRetry,
     });
   }
 
@@ -777,6 +806,8 @@ async function streamLLM({
     networkMode,
     deepThinking,
     onEvent,
+    signal,
+    onRetry,
   });
 }
 

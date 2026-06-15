@@ -196,8 +196,14 @@ type ChatMessage = {
   id: string;
   role: 'user' | 'assistant';
   content: string;
-  status?: 'streaming' | 'complete' | 'error';
+  status?: 'streaming' | 'complete' | 'error' | 'cancelled';
   error?: string | null;
+  retryInfo?: {
+    attempt: number;
+    maxAttempts: number;
+    errorType: 'timeout' | 'network' | 'server' | 'api';
+    message: string;
+  };
 
   // 用户消息字段
   attachmentIds?: string[];
@@ -231,6 +237,11 @@ type ChatMessage = {
 
   // GEO 流程字段
   knowledgeDraft?: GeoAgentKnowledgeDraft;
+  knowledgeUpdateProposal?: {
+    draftId: string;
+    projectId: string;
+    diff: GeoAgentKnowledgeDiffResult['diff'];
+  };
   phaseTwoPrompt?: GeoAgentGeoProject;
   phaseTwoPlatform?: 'doubao' | 'deepseek';
   phaseTwoExecution?: {
@@ -1092,6 +1103,14 @@ export function AgentStudio() {
   const typewriterQueuesRef = useRef<Record<string, Promise<void>>>({});
   const stopRequestedRef = useRef(false);
   const currentAssistantIdRef = useRef<string | null>(null);
+  const currentRequestIdRef = useRef<string | null>(null);
+  const geoRequestIdsRef = useRef<Record<string, string | null>>({
+    phaseTwo: null,
+    sourceDiscovery: null,
+    supportArticles: null,
+    additionalArticles: null,
+  });
+  const blockHistoryRefreshRef = useRef(false);
   const skipNextConversationAutoRestoreRef = useRef(false);
   const prevEnterpriseIdRef = useRef<string | null | undefined>(undefined);
   const pendingKnowledgeIngestRef = useRef<{
@@ -1162,7 +1181,12 @@ export function AgentStudio() {
       return;
     }
 
+    let pendingRefresh = false;
     const fetchConversations = () => {
+      if (blockHistoryRefreshRef.current) {
+        pendingRefresh = true;
+        return;
+      }
       window.geoAgent!.getConversations(currentEnterprise?.id)
         .then((response) => setConversationHistory(response.conversations ?? []))
         .catch(() => setConversationHistory([]));
@@ -1175,16 +1199,25 @@ export function AgentStudio() {
       }
     };
 
+    const handleConversationChanged = () => fetchConversations();
+    const handleHistoryRefreshUnblocked = () => {
+      if (pendingRefresh) {
+        pendingRefresh = false;
+        fetchConversations();
+      }
+    };
+
     fetchConversations();
 
     // 监听对话变化事件
-    const handleConversationChanged = () => fetchConversations();
     window.addEventListener('geo-agent-conversation-changed', handleConversationChanged);
     window.addEventListener('geo-agent-conversations-refresh', handleConversationChanged);
+    window.addEventListener('geo-agent-history-refresh-unblocked', handleHistoryRefreshUnblocked);
 
     return () => {
       window.removeEventListener('geo-agent-conversation-changed', handleConversationChanged);
       window.removeEventListener('geo-agent-conversations-refresh', handleConversationChanged);
+      window.removeEventListener('geo-agent-history-refresh-unblocked', handleHistoryRefreshUnblocked);
     };
   }, [currentEnterprise?.id]);
 
@@ -1351,12 +1384,25 @@ export function AgentStudio() {
   const stopCurrentStream = useCallback(() => {
     stopRequestedRef.current = true;
     const assistantId = currentAssistantIdRef.current;
+    const requestId = currentRequestIdRef.current;
+    if (requestId && window.geoAgent?.cancelStream) {
+      window.geoAgent.cancelStream(requestId).catch(() => undefined);
+    }
+    Object.entries(geoRequestIdsRef.current).forEach(([key, reqId]) => {
+      const id = reqId as string | null;
+      if (id && window.geoAgent?.cancelStream) {
+        window.geoAgent.cancelStream(id).catch(() => undefined);
+      }
+    });
     if (assistantId) {
       typewriterQueuesRef.current[assistantId] = Promise.resolve();
-      setMessages((current) => updateMessage(current, assistantId, { status: 'complete' }));
+      setMessages((current) => updateMessage(current, assistantId, { status: 'cancelled' }));
     }
     setIsSending(false);
     currentAssistantIdRef.current = null;
+    currentRequestIdRef.current = null;
+    blockHistoryRefreshRef.current = false;
+    window.dispatchEvent(new CustomEvent('geo-agent-history-refresh-unblocked'));
   }, []);
 
   const sendMessage = async (
@@ -1382,7 +1428,12 @@ export function AgentStudio() {
       ? options.attachmentIds
       : (!hasFiles && knowledgeIntent !== 'chat' ? previousAttachmentIds.slice(-3) : []);
     const hasReferencedAttachments = referencedAttachmentIds.length > 0;
-    const shouldUseDispatcher = (hasFiles && knowledgeIntent !== 'chat') || hasReferencedAttachments || isKnowledgeIngestSkill || forcedCreateKnowledgeDraft;
+    // update 意图且带附件时走新的“对比-确认”提案流程，不再直接调用 createKnowledgeDraftStream
+    const shouldBuildKnowledgeUpdateProposal = knowledgeIntent === 'update' && (hasFiles || hasReferencedAttachments);
+    const shouldUseDispatcher = (hasFiles && knowledgeIntent !== 'chat' && knowledgeIntent !== 'update')
+      || hasReferencedAttachments
+      || isKnowledgeIngestSkill
+      || forcedCreateKnowledgeDraft;
     const recoverableProjectId = canReuseDraftConversation && conversationProjectId && conversationProjectId !== currentEnterprise?.id
       ? conversationProjectId
       : null;
@@ -1464,15 +1515,21 @@ export function AgentStudio() {
       id: assistantId,
       role: 'assistant',
       content: '',
-      reasoning: shouldShowReasoning ? '正在理解 GEO 任务' : undefined,
+      reasoning: shouldShowReasoning
+        ? (shouldBuildKnowledgeUpdateProposal ? '正在解析附件并与现有知识库对比…' : '正在理解 GEO 任务')
+        : undefined,
       status: 'streaming',
     };
     setInputValue('');
     setSelectedSkill(null);
     setIsSending(true);
+    blockHistoryRefreshRef.current = true;
     stopRequestedRef.current = false;
     currentAssistantIdRef.current = assistantId;
-    if (shouldStartSeparateKnowledgeConversation) {
+    currentRequestIdRef.current = null;
+
+    try {
+      if (shouldStartSeparateKnowledgeConversation) {
       openConversationRequestRef.current += 1;
       visibleConversationIdRef.current = null;
       setConversationId(null);
@@ -1495,10 +1552,10 @@ export function AgentStudio() {
       let activeProjectId = recoverableProjectId || (hasEnterprises ? currentEnterprise.id : undefined);
 
       // 判断是否应该进入知识库创建/更新流程
+      // update 意图且带附件时走新的“对比-确认”提案流程，不再直接调用 createKnowledgeDraftStream
       const shouldEnterKnowledgeFlow = isKnowledgeIngestSkill
         || (knowledgeIntent === 'create' && (hasFiles || hasReferencedAttachments))
-        || (knowledgeIntent === 'update' && (hasFiles || hasReferencedAttachments))
-        || (hasFiles && knowledgeIntent !== 'chat');
+        || (hasFiles && knowledgeIntent !== 'chat' && knowledgeIntent !== 'update');
 
       // 如果用户表明创建知识库意图但没有文件，显示引导信息
       if ((knowledgeIntent === 'create' || knowledgeIntent === 'update') && !hasFiles && !hasReferencedAttachments) {
@@ -1509,6 +1566,44 @@ export function AgentStudio() {
         setMessages((current) => updateMessage(current, assistantId, {
           content: guidanceMessage,
           reasoning: '用户表明知识库意图但未上传文件，显示引导信息。',
+          status: 'complete',
+        }));
+        return;
+      }
+
+      if (shouldBuildKnowledgeUpdateProposal) {
+        if (!window.geoAgent.buildKnowledgeUpdateProposal) {
+          throw new Error('知识库更新提案 API 不可用，请重启 Electron 后重试。');
+        }
+        const assets = hasFiles
+          ? await Promise.all(files.map(filePartToKnowledgeAsset))
+          : await attachmentIdsToKnowledgeAssets(referencedAttachmentIds);
+        const proposalPayload = {
+          message: content,
+          conversation_id: conversationId,
+          intent: 'update',
+          project_id: activeProjectId,
+          assets,
+        };
+        const proposal = await window.geoAgent.buildKnowledgeUpdateProposal(proposalPayload);
+        const hasChanges = proposal.diff.additions.length > 0
+          || proposal.diff.conflicts.length > 0
+          || proposal.diff.arrayMerges.length > 0;
+        const contentText = hasChanges
+          ? '我已解析附件内容，并与现有企业知识库进行对比。请确认以下更新：'
+          : '我已解析附件内容，未发现与现有知识库相比需要补充或冲突的字段。';
+        setMessages((current) => updateMessage(current, assistantId, {
+          content: contentText,
+          knowledgeUpdateProposal: hasChanges
+            ? {
+              draftId: proposal.draftId,
+              projectId: proposal.projectId,
+              diff: proposal.diff,
+            }
+            : undefined,
+          reasoning: hasChanges
+            ? `发现 ${proposal.diff.additions.length} 个缺失字段、${proposal.diff.conflicts.length} 个冲突字段、${proposal.diff.arrayMerges.length} 个可合并数组字段。`
+            : '附件内容与现有知识库一致，无新增或冲突字段。',
           status: 'complete',
         }));
         return;
@@ -1531,13 +1626,13 @@ export function AgentStudio() {
           assets,
         };
         let draft: GeoAgentKnowledgeDraft;
-        let draftFinalEvent: Awaited<ReturnType<NonNullable<Window['geoAgent']>['createKnowledgeDraftStream']>> | null = null;
+        let draftFinalEvent: Awaited<ReturnType<NonNullable<Window['geoAgent']>['createKnowledgeDraftStream']>['promise']> | null = null;
         if (window.geoAgent.createKnowledgeDraftStream) {
           const enqueueKnowledgeTask = (task: () => Promise<void> | void) => enqueueTypewriterTask(typewriterQueuesRef, assistantId, () => {
             if (stopRequestedRef.current) return;
             return task();
           });
-          const finalEvent = await window.geoAgent.createKnowledgeDraftStream(draftPayload, (event) => {
+          const { promise: draftPromise } = window.geoAgent.createKnowledgeDraftStream(draftPayload, (event) => {
             if (stopRequestedRef.current) return;
             if (event.type === 'meta' && event.conversation_id) {
               visibleConversationIdRef.current = event.conversation_id;
@@ -1644,6 +1739,7 @@ export function AgentStudio() {
               }));
             }
           });
+          const finalEvent = await draftPromise;
           if (finalEvent.type === 'error' || !finalEvent.draft) {
             throw new Error(finalEvent.error || 'Knowledge draft creation failed.');
           }
@@ -1797,7 +1893,7 @@ export function AgentStudio() {
       }
 
       if (window.geoAgent.sendChatStream) {
-        const finalEvent = await window.geoAgent.sendChatStream(
+        const { promise, requestId } = window.geoAgent.sendChatStream(
           messageToSend,
           conversationId,
           chatOptions,
@@ -1819,13 +1915,35 @@ export function AgentStudio() {
                   ? (hasFiles && knowledgeIntent !== 'chat' ? `已接收 ${files.length} 个附件，正在解析并写入知识库。${event.message}` : event.message)
                   : undefined,
                 status: 'streaming',
+                retryInfo: undefined,
+              }));
+            }
+            if (event.type === 'retry') {
+              setMessages((current) => updateMessage(current, assistantId, {
+                retryInfo: {
+                  attempt: event.attempt ?? 1,
+                  maxAttempts: event.max_attempts ?? 3,
+                  errorType: event.error_type ?? 'api',
+                  message: event.message || `重试${event.attempt ?? 1}/${event.max_attempts ?? 3}…`,
+                },
+                status: 'streaming',
               }));
             }
             if (event.type === 'delta' && event.text) {
-              setMessages((current) => appendMessageText(current, assistantId, event.text ?? ''));
+              setMessages((current) => updateMessage(current, assistantId, (message) => ({
+                ...message,
+                content: `${message.content ?? ''}${event.text ?? ''}`,
+                status: 'streaming',
+                retryInfo: undefined,
+              })));
             }
             if (event.type === 'reasoning_delta' && event.text) {
-              setMessages((current) => appendMessageText(current, assistantId, event.text ?? '', 'reasoningContent'));
+              setMessages((current) => updateMessage(current, assistantId, (message) => ({
+                ...message,
+                reasoningContent: `${message.reasoningContent ?? ''}${event.text ?? ''}`,
+                status: 'streaming',
+                retryInfo: undefined,
+              })));
             }
             if (event.type === 'search' && event.search_query) {
               setMessages((current) => updateMessage(current, assistantId, (message) => {
@@ -1892,6 +2010,7 @@ export function AgentStudio() {
                 traceSummary: event.traceSummary as AgentTraceSummary | undefined,
                 pendingAction: event.pending_action,
                 error: event.error,
+                retryInfo: undefined,
                 reasoning: shouldShowReasoning ? `${knowledgeIntent !== 'chat' && (hasFiles || hasReferencedAttachments) ? `已解析 ${hasFiles ? files.length : referencedAttachmentIds.length} 个附件并写入企业知识库。` : ''}${buildAssistantReasoning(event.provider, event.model, {
                   deepThinking: shouldShowReasoning,
                   webSearch: false,
@@ -1901,8 +2020,24 @@ export function AgentStudio() {
                 suggestions: suggestions.length > 0 ? suggestions : undefined,
               })));
             }
+            if (event.type === 'error' && event.error) {
+              setMessages((current) => updateMessage(current, assistantId, {
+                content: event.error,
+                status: 'error',
+                error: event.error,
+                retryInfo: undefined,
+              }));
+            }
           }
         );
+        currentRequestIdRef.current = requestId;
+        const finalEvent = await promise;
+        currentRequestIdRef.current = null;
+        if (finalEvent.type === 'cancelled') {
+          setMessages((current) => updateMessage(current, assistantId, { status: 'cancelled' }));
+          setIsSending(false);
+          return;
+        }
         if (stopRequestedRef.current) {
           setIsSending(false);
           return;
@@ -1967,23 +2102,36 @@ export function AgentStudio() {
         window.dispatchEvent(new CustomEvent('geo-agent-conversation-changed', { detail: { id: response.conversation_id } }));
       }
     } catch (error) {
-      if (stopRequestedRef.current) {
-        setIsSending(false);
-        return;
-      }
       const errorMessage = normalizeChatError(error);
+      const wasStopped = stopRequestedRef.current;
       setMessages((current) => updateMessage(current, assistantId, {
-        content: '',
-        status: 'streaming',
-      }));
-      await typeMessageText(setMessages, assistantId, errorMessage, 'content', () => !stopRequestedRef.current);
-      setMessages((current) => updateMessage(current, assistantId, {
-        status: 'error',
+        content: wasStopped ? (current.find((m) => m.id === assistantId)?.content ?? '') : errorMessage,
+        status: wasStopped ? 'cancelled' : 'error',
+        error: wasStopped ? null : errorMessage,
+        retryInfo: undefined,
       }));
     } finally {
       setIsSending(false);
+      currentAssistantIdRef.current = null;
+      currentRequestIdRef.current = null;
+      // 兜底：流已结束但消息仍停留在 streaming 时，强制标记为错误，避免界面卡住
+      setMessages((current) => {
+        const message = current.find((m) => m.id === assistantId);
+        if (message && message.status === 'streaming') {
+          return updateMessage(current, assistantId, {
+            status: 'error',
+            error: message.error || '请求异常结束，未收到完整响应。',
+            retryInfo: undefined,
+          });
+        }
+        return current;
+      });
     }
-  };
+  } finally {
+    blockHistoryRefreshRef.current = false;
+    window.dispatchEvent(new CustomEvent('geo-agent-history-refresh-unblocked'));
+  }
+};
 
   const setSuggestedPrompt = (suggestion: string) => {
     setInputValue(suggestion);
@@ -2103,7 +2251,7 @@ export function AgentStudio() {
 
       // 步骤 1：生成问题池
       if (window.geoAgent.runGeoPhaseTwoReportStream) {
-        await window.geoAgent.runGeoPhaseTwoReportStream(project.id, platform, messageId, conversationId, (event) => {
+        const { promise: phaseTwoPromise, requestId: phaseTwoRequestId } = window.geoAgent.runGeoPhaseTwoReportStream(project.id, platform, messageId, conversationId, (event) => {
           if (event.type === 'status') {
             setMessages((current) => updateMessage(current, phaseTwoTargetId, {
               reasoning: event.message ?? event.step_label ?? `正在生成${platformLabelFor(platform)}阶段二排行榜问题池。`,
@@ -2152,7 +2300,18 @@ export function AgentStudio() {
               status: report?.status === 'failed' ? 'error' : 'complete',
             };
           }
+          if (event.type === 'error' && event.error) {
+            setMessages((current) => updateMessage(current, phaseTwoTargetId, {
+              content: event.error,
+              phaseTwoExecution: undefined,
+              status: 'error',
+              error: event.error,
+            }));
+          }
         });
+        geoRequestIdsRef.current.phaseTwo = phaseTwoRequestId;
+        await phaseTwoPromise;
+        geoRequestIdsRef.current.phaseTwo = null;
       } else {
         const geoReport = await window.geoAgent.runGeoPhaseTwoReport(project.id, platform, messageId);
         if (geoReport) {
@@ -2249,7 +2408,7 @@ export function AgentStudio() {
     try {
       let discovery: GeoAgentGeoSourceDiscovery | null = null;
       if (window.geoAgent.runGeoSourceDiscoveryStream) {
-        const streamResult = await window.geoAgent.runGeoSourceDiscoveryStream(report.geo_project_id, platform, report, null, conversationId, messageId, (event) => {
+        const { promise: sourceDiscoveryPromise, requestId: sourceDiscoveryRequestId } = window.geoAgent.runGeoSourceDiscoveryStream(report.geo_project_id, platform, report, null, conversationId, messageId, (event) => {
           if (event.type === 'meta' && event.message && typeof event.message === 'object') {
             const restored = restoreConversationMessage(event.message as GeoAgentConversationMessage);
             const previousId = stageMessageId || '';
@@ -2291,7 +2450,19 @@ export function AgentStudio() {
             const targetId = ensureStageMessage();
             setMessages((current) => updateMessage(current, targetId, { content: event.content }));
           }
+          if (event.type === 'error' && event.error) {
+            const targetId = ensureStageMessage();
+            setMessages((current) => updateMessage(current, targetId, {
+              content: event.error,
+              sourceDiscoveryExecution: undefined,
+              status: 'error',
+              error: event.error,
+            }));
+          }
         });
+        geoRequestIdsRef.current.sourceDiscovery = sourceDiscoveryRequestId;
+        const streamResult = await sourceDiscoveryPromise;
+        geoRequestIdsRef.current.sourceDiscovery = null;
         if (streamResult.already_running) {
           setMessages((current) => updateMessage(current, messageId, {
             actionBusy: false,
@@ -2409,7 +2580,7 @@ export function AgentStudio() {
     try {
       let result: GeoAgentGeoSupportArticleRunResponse | null = null;
       if (window.geoAgent.runGeoSupportArticlesStream) {
-        const streamResult = await window.geoAgent.runGeoSupportArticlesStream(discovery.geo_project_id, platform, {
+        const { promise: supportArticlesPromise, requestId: supportArticlesRequestId } = window.geoAgent.runGeoSupportArticlesStream(discovery.geo_project_id, platform, {
           messageId: shouldCreateBackendMessage ? null : messageId,
           conversationId: shouldCreateBackendMessage ? conversationId : null,
           parentMessageId: shouldCreateBackendMessage ? messageId : null,
@@ -2451,8 +2622,25 @@ export function AgentStudio() {
           if (event.type === 'done' && event.content) {
             setMessages((current) => updateMessage(current, stageMessageId, { content: event.content }));
           }
+          if (event.type === 'error' && event.error) {
+            setMessages((current) => updateMessage(current, stageMessageId, {
+              content: event.error,
+              articleDraftExecution: undefined,
+              actionBusy: false,
+              status: 'error',
+              error: event.error,
+            }));
+          }
         });
+        geoRequestIdsRef.current.supportArticles = supportArticlesRequestId;
+        const streamResult = await supportArticlesPromise;
+        geoRequestIdsRef.current.supportArticles = null;
         if (streamResult.already_running) {
+          stageInFlightRef.current.delete(lockKey);
+          setMessages((current) => updateMessage(current, stageMessageId, {
+            actionBusy: false,
+            status: 'complete',
+          }));
           return;
         }
       } else {
@@ -2623,6 +2811,47 @@ export function AgentStudio() {
 
   const continueKnowledgeDraftInput = (messageId: string, draft: GeoAgentKnowledgeDraft) => {
     setSupplementDraftDialog({ messageId, draft });
+  };
+
+  const confirmKnowledgeUpdate = async (messageId: string, proposal: NonNullable<ChatMessage['knowledgeUpdateProposal']>, decisions: GeoAgentKnowledgeDiffDecisions) => {
+    if (!window.geoAgent?.applyKnowledgeDiff) {
+      setMessages((current) => updateMessage(current, messageId, {
+        content: '桌面端主进程接口尚未刷新，请完全关闭并重新启动 Electron 后再确认知识库更新。',
+        status: 'error',
+      }));
+      return;
+    }
+    setMessages((current) => updateMessage(current, messageId, { actionBusy: true }));
+    try {
+      const result = await window.geoAgent.applyKnowledgeDiff({
+        projectId: proposal.projectId,
+        draftId: proposal.draftId,
+        decisions,
+      });
+      await refreshEnterprises();
+      window.dispatchEvent(new CustomEvent('geo-agent-knowledge-changed', { detail: { projectId: result.project_id } }));
+      setMessages((current) => updateMessage(current, messageId, {
+        content: '已确认更新，企业知识库已更新。',
+        knowledgeUpdateProposal: undefined,
+        actionBusy: false,
+        status: 'complete',
+      }));
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      setMessages((current) => updateMessage(current, messageId, {
+        content: `更新失败：${errorMessage}`,
+        actionBusy: false,
+        status: 'error',
+      }));
+    }
+  };
+
+  const cancelKnowledgeUpdate = (messageId: string) => {
+    setMessages((current) => updateMessage(current, messageId, {
+      content: '已取消更新，企业知识库未修改。',
+      knowledgeUpdateProposal: undefined,
+      status: 'complete',
+    }));
   };
 
   const selectSkill = (skill: GeoAgentSkill) => {
@@ -2829,6 +3058,8 @@ export function AgentStudio() {
               setInputValue={setInputValue}
               onSuggestionSelect={handleSuggestionSelect}
               onConfirmDraft={confirmKnowledgeDraft}
+              onConfirmKnowledgeUpdate={confirmKnowledgeUpdate}
+              onCancelKnowledgeUpdate={cancelKnowledgeUpdate}
               onConfirmPhaseTwo={confirmPhaseTwo}
               onContinueKnowledgeDraft={continueKnowledgeDraftInput}
               onConfirmSupportArticles={runSupportArticlesFromDiscovery}
@@ -3042,8 +3273,8 @@ export function AgentStudio() {
             initial={{ x: '-100%' }}
             animate={{ x: 0 }}
             exit={{ x: '-100%' }}
-            transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-            className="fixed left-0 top-0 h-full w-[320px] max-w-[85vw] bg-surface-container-low z-[9999] shadow-xl"
+            transition={{ type: 'tween', duration: 0.2, ease: 'easeOut' }}
+            className="fixed left-0 top-0 h-full w-[320px] max-w-[85vw] bg-surface-container-low z-[9999] shadow-xl will-change-transform pointer-events-auto"
             onClick={(e) => e.stopPropagation()}
             style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
           >
@@ -3306,6 +3537,8 @@ const ChatBubble: React.FC<{
   onSuggestionSelect: (suggestion: ChatSuggestion) => void;
   onContinueKnowledgeDraft: (messageId: string, draft: GeoAgentKnowledgeDraft) => void;
   onConfirmDraft: (messageId: string, draft: GeoAgentKnowledgeDraft) => void;
+  onConfirmKnowledgeUpdate: (messageId: string, proposal: NonNullable<ChatMessage['knowledgeUpdateProposal']>, decisions: GeoAgentKnowledgeDiffDecisions) => void;
+  onCancelKnowledgeUpdate: (messageId: string) => void;
   onConfirmPhaseTwo: (messageId: string, project: GeoAgentGeoProject, platform?: 'doubao' | 'deepseek') => void;
   onConfirmSupportArticles: (messageId: string, discovery: GeoAgentGeoSourceDiscovery) => void;
   onRequestSupportArticles: (messageId: string, discovery: GeoAgentGeoSourceDiscovery) => void;
@@ -3313,7 +3546,7 @@ const ChatBubble: React.FC<{
   onRunSourceDiscovery: (messageId: string, report: GeoAgentGeoReport) => void;
   runningStageKeys: Set<string>;
   workflowState: GeoAgentWorkflowState | null;
-}> = ({ message, setInputValue, onSuggestionSelect, onContinueKnowledgeDraft, onConfirmDraft, onConfirmPhaseTwo, onConfirmSupportArticles, onRequestSupportArticles, onRunArticleDraft, onRunSourceDiscovery, runningStageKeys, workflowState }) => {
+}> = ({ message, setInputValue, onSuggestionSelect, onContinueKnowledgeDraft, onConfirmDraft, onConfirmKnowledgeUpdate, onCancelKnowledgeUpdate, onConfirmPhaseTwo, onConfirmSupportArticles, onRequestSupportArticles, onRunArticleDraft, onRunSourceDiscovery, runningStageKeys, workflowState }) => {
   const nextAction = getNextWorkflowAction(workflowState, message, runningStageKeys);
   if (message.role === 'user') {
     // 检查消息是否包含附件信息
@@ -3446,6 +3679,13 @@ const ChatBubble: React.FC<{
             visibleGroupCount={message.progressiveDraftGroups}
           />
         )}
+        {message.knowledgeUpdateProposal && (
+          <KnowledgeUpdateProposalCard
+            proposal={message.knowledgeUpdateProposal}
+            onConfirm={(decisions) => onConfirmKnowledgeUpdate(message.id, message.knowledgeUpdateProposal!, decisions)}
+            onCancel={() => onCancelKnowledgeUpdate(message.id)}
+          />
+        )}
         {message.phaseTwoPrompt && (
           <PhaseTwoPromptPreview
             project={message.phaseTwoPrompt}
@@ -3491,10 +3731,22 @@ const ChatBubble: React.FC<{
           toolCalls={message.toolCalls}
           traceSummary={message.traceSummary}
         />
+        {message.retryInfo && (
+          <div className="mt-2 flex items-center gap-2 text-[12px] text-amber-600 dark:text-amber-400">
+            <span className="relative flex size-3">
+              <span className="absolute inline-flex size-full animate-ping rounded-full bg-amber-400 opacity-75" />
+              <span className="relative inline-flex size-3 rounded-full bg-amber-500" />
+            </span>
+            <span>{message.retryInfo.message}</span>
+          </div>
+        )}
         {message.status === 'streaming' && (
           message.content || message.phaseTwoExecution || message.sourceDiscoveryExecution || message.articleDraftExecution
             ? <StreamingTailIndicator label={message.reasoning ?? '正在等待模型继续输出'} />
             : <ThinkingIndicator label={message.reasoning ?? '正在思考'} />
+        )}
+        {message.status === 'cancelled' && (
+          <div className="mt-2 text-[12px] text-on-surface-variant/70">已停止生成</div>
         )}
         {message.suggestions && message.suggestions.length > 0 && message.status === 'complete' && (
           <Suggestions className="mt-4">
@@ -3735,6 +3987,163 @@ const KnowledgeDraftPreview: React.FC<{
           )}
         </div>
       )}
+    </div>
+  );
+};
+
+const KnowledgeUpdateProposalCard: React.FC<{
+  proposal: NonNullable<ChatMessage['knowledgeUpdateProposal']>;
+  onConfirm: (decisions: GeoAgentKnowledgeDiffDecisions) => Promise<void>;
+  onCancel: () => void;
+}> = ({ proposal, onConfirm, onCancel }) => {
+  const { diff } = proposal;
+  const [conflictChoices, setConflictChoices] = useState<Record<string, 'overwrite' | 'skip'>>(() => {
+    const initial: Record<string, 'overwrite' | 'skip'> = {};
+    diff.conflicts.forEach((conflict) => {
+      initial[conflict.key] = 'overwrite';
+    });
+    return initial;
+  });
+  const [isBusy, setIsBusy] = useState(false);
+
+  const hasAdditions = diff.additions.length > 0 || diff.arrayMerges.length > 0;
+  const hasConflicts = diff.conflicts.length > 0;
+
+  const renderFieldValue = (value: GeoAgentProfileFieldValue) => {
+    if (Array.isArray(value)) {
+      return value.length > 0
+        ? value.map((item, index) => (
+            <span className="block" key={index}>• {String(item)}</span>
+          ))
+        : '（空）';
+    }
+    return value ? String(value) : '（空）';
+  };
+
+  const handleConfirm = async () => {
+    setIsBusy(true);
+    try {
+      const decisions: GeoAgentKnowledgeDiffDecisions = {
+        additions: {},
+        arrayMerges: {},
+        conflicts: conflictChoices,
+      };
+      diff.additions.forEach((addition) => {
+        decisions.additions![addition.key] = 'apply';
+      });
+      diff.arrayMerges.forEach((merge) => {
+        decisions.arrayMerges![merge.key] = 'apply';
+      });
+      await onConfirm(decisions);
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
+  return (
+    <div className="mb-5 rounded-2xl border border-[#e0ddd8] bg-white p-4 text-[#2f2f2f] shadow-sm dark:border-[#3a3a3a] dark:bg-[#2a2a2a] dark:text-[#f1f1f1]">
+      <div className="mb-3 flex items-center gap-2 text-[14px] font-bold text-primary">
+        <Database className="size-4 text-secondary" />
+        企业知识库更新确认
+      </div>
+
+      {hasAdditions && (
+        <div className="mb-4">
+          <h4 className="mb-2 text-[12px] font-bold text-[#5d574f] dark:text-[#cfcfcf]">
+            待补充字段（确认后将直接写入知识库）
+          </h4>
+          <div className="grid gap-2">
+            {diff.additions.map((addition) => (
+              <div className="rounded-xl bg-[#f7f6f3] p-3 dark:bg-[#333333]" key={addition.key}>
+                <div className="mb-1 text-[11px] font-semibold text-[#8a837a] dark:text-[#969696]">{addition.label}</div>
+                <div className="text-[13px] leading-relaxed text-[#34312d] dark:text-[#eeeeee]">
+                  {renderFieldValue(addition.newValue)}
+                </div>
+              </div>
+            ))}
+            {diff.arrayMerges.map((merge) => (
+              <div className="rounded-xl bg-[#f7f6f3] p-3 dark:bg-[#333333]" key={merge.key}>
+                <div className="mb-1 text-[11px] font-semibold text-[#8a837a] dark:text-[#969696]">{merge.label}</div>
+                <div className="text-[13px] leading-relaxed text-[#34312d] dark:text-[#eeeeee]">
+                  <span className="mb-1 block text-[12px] text-[#8a837a] dark:text-[#969696]">将新增以下项：</span>
+                  {merge.addedItems.map((item, index) => (
+                    <span className="block" key={index}>+ {item}</span>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {hasConflicts && (
+        <div className="mb-4">
+          <h4 className="mb-2 text-[12px] font-bold text-[#5d574f] dark:text-[#cfcfcf]">
+            冲突字段（请选择保留哪个值）
+          </h4>
+          <div className="grid gap-3">
+            {diff.conflicts.map((conflict) => (
+              <div className="rounded-xl border border-[#e8e5e0] p-3 dark:border-[#444444]" key={conflict.key}>
+                <div className="mb-2 text-[11px] font-semibold text-[#8a837a] dark:text-[#969696]">{conflict.label}</div>
+                <div className="grid gap-2">
+                  <button
+                    className={cn(
+                      'flex flex-col items-start rounded-lg border p-2.5 text-left transition-colors',
+                      conflictChoices[conflict.key] === 'overwrite'
+                        ? 'border-primary bg-primary/5 dark:bg-primary/10'
+                        : 'border-[#e0ddd8] bg-white hover:bg-[#f7f6f3] dark:border-[#444444] dark:bg-[#2a2a2a] dark:hover:bg-[#333333]'
+                    )}
+                    disabled={isBusy}
+                    onClick={() => setConflictChoices((prev) => ({ ...prev, [conflict.key]: 'overwrite' }))}
+                    type="button"
+                  >
+                    <span className="mb-1 text-[11px] font-bold text-primary">采用新值</span>
+                    <span className="text-[13px] leading-relaxed text-[#34312d] dark:text-[#eeeeee]">
+                      {renderFieldValue(conflict.newValue)}
+                    </span>
+                  </button>
+                  <button
+                    className={cn(
+                      'flex flex-col items-start rounded-lg border p-2.5 text-left transition-colors',
+                      conflictChoices[conflict.key] === 'skip'
+                        ? 'border-primary bg-primary/5 dark:bg-primary/10'
+                        : 'border-[#e0ddd8] bg-white hover:bg-[#f7f6f3] dark:border-[#444444] dark:bg-[#2a2a2a] dark:hover:bg-[#333333]'
+                    )}
+                    disabled={isBusy}
+                    onClick={() => setConflictChoices((prev) => ({ ...prev, [conflict.key]: 'skip' }))}
+                    type="button"
+                  >
+                    <span className="mb-1 text-[11px] font-bold text-[#8a837a] dark:text-[#969696]">保留现有值</span>
+                    <span className="text-[13px] leading-relaxed text-[#34312d] dark:text-[#eeeeee]">
+                      {renderFieldValue(conflict.existingValue)}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="flex items-center gap-3">
+        <Button
+          className="rounded-full px-5"
+          disabled={isBusy}
+          onClick={handleConfirm}
+          size="sm"
+        >
+          {isBusy ? '正在更新…' : '确认更新'}
+        </Button>
+        <Button
+          className="rounded-full px-5"
+          disabled={isBusy}
+          onClick={onCancel}
+          size="sm"
+          variant="outline"
+        >
+          取消
+        </Button>
+      </div>
     </div>
   );
 };

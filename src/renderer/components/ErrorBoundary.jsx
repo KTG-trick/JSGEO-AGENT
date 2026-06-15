@@ -8,6 +8,7 @@ export class ErrorBoundary extends Component {
       hasError: false,
       error: null,
       errorInfo: null,
+      retryKey: 0,
     };
   }
 
@@ -32,11 +33,12 @@ export class ErrorBoundary extends Component {
   }
 
   handleRetry = () => {
-    this.setState({
+    this.setState((prev) => ({
       hasError: false,
       error: null,
       errorInfo: null,
-    });
+      retryKey: prev.retryKey + 1,
+    }));
   };
 
   handleReload = () => {
@@ -127,6 +129,6 @@ export class ErrorBoundary extends Component {
       );
     }
 
-    return this.props.children;
+    return <div key={this.state.retryKey}>{this.props.children}</div>;
   }
 }

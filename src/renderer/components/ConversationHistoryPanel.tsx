@@ -190,7 +190,7 @@ export function ConversationHistoryPanel({
         <div className="flex items-center gap-1">
           {onNewConversation && (
             <button
-              className="p-1.5 rounded-md hover:bg-surface-container text-on-surface-variant hover:text-primary transition-colors cursor-pointer"
+              className="p-2 rounded-md hover:bg-surface-container text-on-surface-variant hover:text-primary transition-colors cursor-pointer"
               onClick={(e) => {
                 e.stopPropagation();
                 onNewConversation();
@@ -203,7 +203,7 @@ export function ConversationHistoryPanel({
           )}
           {onClose && (
             <button
-              className="p-1.5 rounded-md hover:bg-surface-container text-on-surface-variant hover:text-on-surface transition-colors cursor-pointer"
+              className="p-2 rounded-md hover:bg-surface-container text-on-surface-variant hover:text-on-surface transition-colors cursor-pointer"
               onClick={(e) => {
                 e.stopPropagation();
                 onClose();

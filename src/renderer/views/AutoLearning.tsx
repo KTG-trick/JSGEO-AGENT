@@ -199,10 +199,15 @@ export function AutoLearning() {
     setVisibilityProgress(trigger === 'auto' ? '阶段六已自动启动推荐可见性检测。' : '正在立即复查阶段六推荐可见性。');
     setError(null);
     try {
-      const response = await window.geoAgent.runVisibilityCheckStream(`geo-${currentEnterpriseId}`, 'doubao', (event) => {
+      const { promise: visibilityPromise } = window.geoAgent.runVisibilityCheckStream(`geo-${currentEnterpriseId}`, 'doubao', (event) => {
         if (event.type === 'status' && event.message) setVisibilityProgress(event.message);
         if (event.type === 'result' && event.visibility_check) setVisibilityCheck(event.visibility_check);
+        if (event.type === 'error' && event.error) {
+          setError(event.error);
+          setVisibilityProgress('阶段六检测失败');
+        }
       });
+      const response = await visibilityPromise;
       if (response.visibility_check) {
         setVisibilityCheck(response.visibility_check);
         await maybeRunReflection(response.visibility_check, previous);
@@ -221,7 +226,8 @@ export function AutoLearning() {
     setManualProgress('正在执行自动学习周期...');
     setError(null);
     try {
-      await window.geoAgent.triggerAutoLearningNow();
+      const { promise: autoLearnPromise } = window.geoAgent.triggerAutoLearningNow();
+      await autoLearnPromise;
       setManualProgress('自动学习周期已启动，请等待完成。');
       // 刷新数据
       await loadRules();

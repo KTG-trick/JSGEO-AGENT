@@ -31,6 +31,16 @@ function clampCount(value) {
   return Math.min(MAX_ADDITIONAL_ARTICLES, Math.max(1, Math.floor(number)));
 }
 
+function formatRetryMessage(attempt, maxAttempts, errorType) {
+  const typeText = {
+    timeout: 'API 超时',
+    network: '网络连接异常',
+    server: '服务暂不可用',
+    api: '请求失败',
+  }[errorType] || '请求失败';
+  return `${typeText}，重试${attempt}/${maxAttempts}…`;
+}
+
 function parseRequestedArticleCount(text) {
   const value = String(text || '');
   const digitMatch = value.match(/(\d{1,2})\s*(篇|个|条)?/);
@@ -599,7 +609,7 @@ const toolDefinitions = {
     requiresConfirmation: false,
     taskPolicy: 'rag_chat',
     validate: () => validation(true),
-    execute: async ({ input, projectId, conversation, run, contextPack, sender, channel, localSteps }) => {
+    execute: async ({ input, projectId, conversation, run, contextPack, sender, channel, localSteps, signal }) => {
       const policy = getTaskPolicy('rag_chat');
       let assistantContent = '';
       let provider = policy.provider || 'ark';
@@ -620,48 +630,66 @@ const toolDefinitions = {
         status: 'running',
         title: '上下文对话',
       });
-      await llmGateway.streamLLM({
-        messages: contextPack.modelMessages,
-        temperature: 0.7,
-        maxTokens: 4000,
-        taskType: 'agent_chat',
-        provider,
-        model,
-        apiFamily: policy.api_family,
-        networkMode: policy.network_mode,
-        deepThinking: policy.deep_thinking,
-        onEvent: (streamEvent) => {
-          if (streamEvent.type === 'model_start' || streamEvent.type === 'model_status') {
-            provider = streamEvent.provider || provider;
-            model = streamEvent.model || model;
+      let isAborted = false;
+      try {
+        await llmGateway.streamLLM({
+          messages: contextPack.modelMessages,
+          temperature: 0.7,
+          maxTokens: 4000,
+          taskType: 'agent_chat',
+          provider,
+          model,
+          apiFamily: policy.api_family,
+          networkMode: policy.network_mode,
+          deepThinking: policy.deep_thinking,
+          signal,
+          onRetry: ({ attempt, maxRetries, errorType }) => {
             sender.send(channel, {
-              type: 'meta',
-              conversation_id: conversation.id,
-              provider,
-              model,
-              run_id: run.id,
-              context_usage: contextUsagePayload(contextPack.tokenUsage, model || provider),
-              context_pack_summary: contextPack.summary,
-            });
-          }
-          if (streamEvent.type === 'status') {
-            sender.send(channel, {
-              type: 'status',
-              message: streamEvent.message || '正在处理...',
+              type: 'retry',
+              attempt,
+              max_attempts: maxRetries,
+              error_type: errorType,
+              message: formatRetryMessage(attempt, maxRetries, errorType),
               conversation_id: conversation.id,
               run_id: run.id,
             });
-          }
-          if (streamEvent.type === 'reasoning_delta' && streamEvent.text) {
-            reasoningContent = (reasoningContent || '') + streamEvent.text;
-            sender.send(channel, { type: 'reasoning_delta', text: streamEvent.text, run_id: run.id });
-          }
-          if (streamEvent.type === 'delta' && streamEvent.text) {
-            assistantContent += streamEvent.text;
-            sender.send(channel, { type: 'delta', text: streamEvent.text, run_id: run.id });
-          }
-        },
-      });
+          },
+          onEvent: (streamEvent) => {
+            if (streamEvent.type === 'model_start' || streamEvent.type === 'model_status') {
+              provider = streamEvent.provider || provider;
+              model = streamEvent.model || model;
+              sender.send(channel, {
+                type: 'meta',
+                conversation_id: conversation.id,
+                provider,
+                model,
+                run_id: run.id,
+                context_usage: contextUsagePayload(contextPack.tokenUsage, model || provider),
+                context_pack_summary: contextPack.summary,
+              });
+            }
+            if (streamEvent.type === 'status') {
+              sender.send(channel, {
+                type: 'status',
+                message: streamEvent.message || '正在处理...',
+                conversation_id: conversation.id,
+                run_id: run.id,
+              });
+            }
+            if (streamEvent.type === 'reasoning_delta' && streamEvent.text) {
+              reasoningContent = (reasoningContent || '') + streamEvent.text;
+              sender.send(channel, { type: 'reasoning_delta', text: streamEvent.text, run_id: run.id });
+            }
+            if (streamEvent.type === 'delta' && streamEvent.text) {
+              assistantContent += streamEvent.text;
+              sender.send(channel, { type: 'delta', text: streamEvent.text, run_id: run.id });
+            }
+          },
+        });
+      } catch (error) {
+        isAborted = error.name === 'AbortError' || signal?.aborted;
+        if (!isAborted) throw error;
+      }
       const savedMessage = conversationService.addMessage({
         conversationId: conversation.id,
         projectId,
@@ -671,7 +699,7 @@ const toolDefinitions = {
           type: 'chat_response',
           provider,
           model,
-          status: 'complete',
+          status: isAborted ? 'cancelled' : 'complete',
           context_usage: contextUsagePayload(contextPack.tokenUsage, model || provider),
           context_pack_summary: contextPack.summary,
           run_id: run.id,
@@ -682,13 +710,13 @@ const toolDefinitions = {
         stepIndex: 3,
         stepType: 'model_result',
         toolName: 'chat_with_context',
-        status: 'completed',
-        output: { content_length: assistantContent.length },
+        status: isAborted ? 'cancelled' : 'completed',
+        output: { content_length: assistantContent.length, aborted: isAborted },
       });
       localSteps[localSteps.length - 1] = {
         stepType: 'model_result',
         toolName: 'chat_with_context',
-        status: 'completed',
+        status: isAborted ? 'cancelled' : 'completed',
         title: '上下文对话',
       };
       return {
@@ -697,7 +725,7 @@ const toolDefinitions = {
         provider,
         model,
         reasoning_content: reasoningContent,
-        status: 'completed',
+        status: isAborted ? 'cancelled' : 'completed',
       };
     },
     toSuggestions: ({ contextPack }) => suggestionsFor({ intent: 'chat', contextPack }),
@@ -747,7 +775,7 @@ function resolveIntent(payload = {}) {
   return { intent: 'chat', toolName: 'chat_with_context', input: { message } };
 }
 
-async function runChatStream({ payload = {}, sender, channel }) {
+async function runChatStream({ payload = {}, sender, channel, signal = null }) {
   const projectId = payload.project_id || payload.projectId || null;
   const attachmentIds = Array.isArray(payload.attachment_ids)
     ? payload.attachment_ids.filter(Boolean)
@@ -831,9 +859,10 @@ async function runChatStream({ payload = {}, sender, channel }) {
       sender,
       channel,
       localSteps,
+      signal,
     });
     traceService.updateRun(run.id, {
-      status: result.status === 'failed' ? 'failed' : 'completed',
+      status: result.status === 'cancelled' ? 'cancelled' : (result.status === 'failed' ? 'failed' : 'completed'),
       provider: result.provider || null,
       model: result.model || null,
       token_usage: contextPack.tokenUsage,
@@ -847,7 +876,7 @@ async function runChatStream({ payload = {}, sender, channel }) {
       contextPack,
       localSteps,
       startedAt: runStartedAt,
-      status: result.status === 'failed' ? 'failed' : 'completed',
+      status: result.status === 'cancelled' ? 'cancelled' : (result.status === 'failed' ? 'failed' : 'completed'),
       error: result.error || null,
     });
     return {
@@ -869,13 +898,14 @@ async function runChatStream({ payload = {}, sender, channel }) {
       context_usage: contextUsagePayload(contextPack.tokenUsage, result.model || result.provider || 'agent-runtime'),
       context_pack_summary: contextPack.summary,
       tool_calls: [
-        makeToolCall(tool.name, result.status === 'failed' ? 'failed' : 'completed', tool.description, {
+        makeToolCall(tool.name, result.status === 'cancelled' ? 'cancelled' : (result.status === 'failed' ? 'failed' : 'completed'), tool.description, {
           artifactType: result.artifactType || null,
           artifactId: result.artifactId || null,
         }),
       ],
       traceSummary,
       suggestions: tool.toSuggestions({ result, contextPack }),
+      status: result.status === 'cancelled' ? 'cancelled' : (result.status === 'failed' ? 'failed' : 'completed'),
     };
   } catch (error) {
     const message = error.message || String(error);

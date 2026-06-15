@@ -238,7 +238,7 @@ export function WebBuilder() {
     setShowGenerateDialog(false);
 
     try {
-      const website = await window.geoAgent.generateWebsiteStream(
+      const { promise: websitePromise } = window.geoAgent.generateWebsiteStream(
         currentEnterpriseId,
         options,
         (event) => {
@@ -255,6 +255,7 @@ export function WebBuilder() {
           }
         }
       );
+      const website = await websitePromise;
       console.log('[WebBuilder] generate done:', website);
       // 生成完成，刷新列表
       await loadWebsites();

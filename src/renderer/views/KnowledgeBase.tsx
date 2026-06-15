@@ -974,7 +974,15 @@ function KnowledgeDetail({
       };
       let draft: GeoAgentKnowledgeDraft | undefined;
       if (window.geoAgent.createKnowledgeDraftStream) {
-        const finalEvent = await window.geoAgent.createKnowledgeDraftStream(draftPayload, () => undefined);
+        const { promise: draftPromise } = window.geoAgent.createKnowledgeDraftStream(draftPayload, (streamEvent) => {
+          if (streamEvent.type === 'error' && streamEvent.error) {
+            setUploadError(streamEvent.error);
+          }
+          if (streamEvent.type === 'status' && streamEvent.message) {
+            setUploadNotice(streamEvent.message);
+          }
+        });
+        const finalEvent = await draftPromise;
         if (finalEvent.type === 'error') {
           throw new Error(finalEvent.error || '知识库更新草稿生成失败。');
         }

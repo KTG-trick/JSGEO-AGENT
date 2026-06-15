@@ -41,6 +41,7 @@ app.commandLine.appendSwitch('disable-gpu-sandbox');
 
 let mainWindow = null;
 let databaseStartupWarning = null;
+const activeStreams = new Map(); // requestId -> { abortController, channel, sender }
 
 function canWriteDirectory(dir) {
   try {
@@ -455,6 +456,11 @@ async function createWindow() {
     return { action: 'deny' };
   });
 
+  // 窗口关闭/重载时清理活跃流，避免向已销毁的 webContents 发送消息
+  mainWindow.webContents.on('destroyed', () => {
+    clearAllActiveStreams();
+  });
+
   if (isDev) {
     if (await canReachUrl(devServerUrl)) {
       try {
@@ -623,6 +629,8 @@ function registerHandlers() {
     const requestId = request.requestId;
     const payload = request.payload || {};
     const channel = `geo-agent:create-knowledge-draft-stream:${requestId}`;
+    const abortController = new AbortController();
+    activeStreams.set(requestId, { abortController, channel, sender: event.sender });
     const isCreateIntent = (payload.intent || 'create') === 'create';
     const canReuseDraftConversation = isCreateIntent
       && payload.conversation_id
@@ -637,7 +645,8 @@ function registerHandlers() {
     let processingDraft = null;
     let processingMessage = null;
     try {
-      if (true) {
+      try {
+        if (true) {
         // 尝试复用最近的 geo_workflow 会话；没有则创建新的会话。
         let effectiveConversationId = payload.conversation_id || null;
         if (!effectiveConversationId && projectId && !isCreateIntent) {
@@ -685,7 +694,7 @@ function registerHandlers() {
             confirmation_state: 'approval-responded',
           },
         });
-        event.sender.send(channel, {
+        safeSend(event.sender, channel, {
           type: 'meta',
           task: 'knowledge_extraction',
           conversation_id: conversation.id,
@@ -696,7 +705,7 @@ function registerHandlers() {
         });
       }
       const draft = await knowledgeService.createKnowledgeDraft(payload, (streamEvent) => {
-        event.sender.send(channel, streamEvent);
+        safeSend(event.sender, channel, streamEvent);
       });
       if (draft.extraction_status === 'failed' || draft.status === 'failed') {
         const error = draft.error_message || draft.warnings?.[0] || '知识库草稿创建失败。';
@@ -714,7 +723,7 @@ function registerHandlers() {
             },
           });
         }
-        event.sender.send(channel, { type: 'error', error, draft, can_proceed: false });
+        safeSend(event.sender, channel, { type: 'error', error, draft, can_proceed: false });
         return { type: 'error', error, draft, can_proceed: false };
       }
       if (conversation) {
@@ -735,7 +744,7 @@ function registerHandlers() {
           : conversationService.addMessage({ ...messagePayload, role: 'assistant' });
         draft.conversation_id = conversation.id;
       }
-      event.sender.send(channel, { type: 'done', draft, conversation_id: conversation?.id, project_id: projectId, message: draftMessage, can_proceed: true });
+      safeSend(event.sender, channel, { type: 'done', draft, conversation_id: conversation?.id, project_id: projectId, message: draftMessage, can_proceed: true });
       return { type: 'done', draft, conversation_id: conversation?.id, project_id: projectId, message: draftMessage, can_proceed: true };
     } catch (error) {
       const message = error.message || String(error);
@@ -757,10 +766,13 @@ function registerHandlers() {
           // 保留原始错误返回；恢复消息更新失败不应吞掉主错误。
         }
       }
-      event.sender.send(channel, { type: 'error', error: message, can_proceed: false });
+      safeSend(event.sender, channel, { type: 'error', error: message, can_proceed: false });
       return { type: 'error', error: message, can_proceed: false };
     }
-  });
+  } finally {
+    activeStreams.delete(requestId);
+  }
+});
   ipcMain.handle('geo-agent:confirm-knowledge-draft', async (_event, payload = {}) => {
     const response = await knowledgeService.confirmKnowledgeDraft(payload);
     const projectId = response.project_id;
@@ -855,6 +867,8 @@ function registerHandlers() {
     knowledgeService.rejectKnowledgeDraft(draftId));
   ipcMain.handle('geo-agent:build-knowledge-diff', async (_event, payload = {}) =>
     knowledgeService.buildDraftDiff(payload));
+  ipcMain.handle('geo-agent:build-knowledge-update-proposal', async (_event, payload = {}) =>
+    knowledgeService.buildKnowledgeUpdateProposal(payload));
   ipcMain.handle('geo-agent:apply-knowledge-diff', async (_event, payload = {}) =>
     knowledgeService.applyDraftDiff(payload));
 
@@ -930,237 +944,69 @@ function registerHandlers() {
       search_usage: {},
       reasoning_content: null,
     };
-
-    return {
-      role: 'assistant',
-      content: 'Electron-only service layer is being rebuilt. Local enterprise database and knowledge base indexing are available.',
-      conversation_id: payload.conversation_id || `shell-${Date.now()}`,
-      provider: 'electron-main',
-      model: payload.selected_model || 'not-connected',
-      error: null,
-      sources: [],
-      search_queries: [],
-      search_actions: [],
-      search_usage: {},
-      reasoning_content: null,
-    };
   });
+
+  ipcMain.handle('geo-agent:cancel-stream', async (_event, { requestId }) => {
+    const stream = activeStreams.get(requestId);
+    if (stream?.abortController) {
+      stream.abortController.abort();
+      return { ok: true };
+    }
+    return { ok: false, reason: 'stream_not_found' };
+  });
+
+  // 安全发送：检查 webContents 是否已销毁
+  function safeSend(sender, channel, data) {
+    try {
+      if (sender && !sender.isDestroyed()) {
+        sender.send(channel, data);
+      }
+    } catch (err) {
+      console.warn('[IPC] safeSend 失败:', err.message);
+    }
+  }
+
+  // 清理所有活跃流（窗口关闭/重载时调用）
+  function clearAllActiveStreams() {
+    for (const [id, stream] of activeStreams.entries()) {
+      try {
+        if (stream.abortController) stream.abortController.abort();
+      } catch (_) { /* 忽略 */ }
+    }
+    activeStreams.clear();
+  }
 
   ipcMain.handle('geo-agent:send-chat-stream', async (event, request = {}) => {
     const requestId = request.requestId;
     const payload = request.payload || {};
     const channel = `geo-agent:chat-stream:${requestId}`;
+    const abortController = new AbortController();
+    activeStreams.set(requestId, { abortController, channel, sender: event.sender });
     try {
       const doneEvent = await agentRuntimeService.runChatStream({
         payload,
         sender: event.sender,
         channel,
+        signal: abortController.signal,
       });
-      event.sender.send(channel, doneEvent);
+      safeSend(event.sender, channel, doneEvent);
       return doneEvent;
-
-      const projectId = payload.project_id || payload.projectId;
-      const conversation = conversationService.ensureConversation({
-        projectId,
-        conversationId: payload.conversation_id || null,
-        firstMessage: payload.message,
-      });
-      conversationService.addMessage({
-        conversationId: conversation.id,
-        projectId,
-        role: 'user',
-        content: payload.message || '',
-        metadata: { type: 'chat_user' },
-      });
-
-      const additionalArticleRequest = inferAdditionalArticleRequest(payload.message);
-      if (additionalArticleRequest && projectId) {
-        const platform = payload.platform || 'doubao';
-        const stageMessage = conversationService.addMessage({
-          conversationId: conversation.id,
-          projectId,
-          role: 'assistant',
-          content: `正在继续生成 ${additionalArticleRequest.count} 篇完整稿件，生成后会保存到稿件管理。`,
-          metadata: {
-            type: 'geo_additional_articles',
-            status: 'streaming',
-            phase: 4,
-            platform,
-            request: additionalArticleRequest,
-          },
-        });
-        event.sender.send(channel, {
-          type: 'meta',
-          conversation_id: conversation.id,
-          message: stageMessage,
-          platform,
-          action: 'additional_articles',
-        });
-        const additionalResult = await articleDraftService.generateAdditionalArticlesStream(
-          {
-            geoProjectId: `geo-${projectId}`,
-            platform,
-            ...additionalArticleRequest,
-          },
-          (streamEvent) => {
-            event.sender.send(channel, streamEvent);
-          },
-        );
-        const content = additionalResult.status === 'completed'
-          ? `已继续生成 ${additionalResult.total || additionalArticleRequest.count} 篇完整稿件，均已保存到稿件管理，可继续校对、预览和发布。`
-          : `继续生成稿件失败：${additionalResult.error_message || '请稍后重试。'}`;
-        const savedMessage = conversationService.updateConversationMessage({
-          messageId: stageMessage.id,
-          conversationId: conversation.id,
-          projectId,
-          content,
-          metadata: {
-            type: 'geo_additional_articles',
-            status: additionalResult.status || 'completed',
-            phase: 4,
-            platform,
-            request: additionalArticleRequest,
-            additional_articles: additionalResult,
-            confirmation_state: 'output-available',
-            confirmation_approved: true,
-          },
-        });
-        const doneEvent = {
-          type: 'done',
-          conversation_id: conversation.id,
-          message: savedMessage,
-          content,
-          additional_articles: additionalResult,
-          provider: '',
-          model: '',
-          error: null,
-          sources: [],
-          search_queries: [],
-          search_actions: [],
-          search_usage: {},
-          suggestions: [
-            { label: '再生成 1 篇排行榜稿', value: '再生成 1 篇排行榜稿', actionType: 'send_message' },
-            { label: '生成 3 篇支撑稿', value: '再生成 3 篇支撑稿', actionType: 'send_message' },
-            { label: '前往稿件管理校对', value: 'drafts', actionType: 'navigate', payload: { view: 'drafts' } },
-          ],
-        };
-        event.sender.send(channel, doneEvent);
-        return doneEvent;
-      }
-
-      // 使用上下文窗口管理服务构建消息历史
-      const contextMessages = await contextWindowService.buildContextWindow(
-        conversation.id,
-        projectId,
-        { maxTokens: 100000, recentMessageCount: 8 }
-      );
-
-      // 构建最终消息数组（systemPrompt 需要包装成 {role, content} 格式）
-      const messages = [
-        {
-          role: 'system',
-          content: contextMessages.systemPrompt,
-        },
-        ...contextMessages.history,
-      ];
-
-      // 记录 token 使用情况（用于调试）
-      console.log('[chat-stream] Token usage:', contextMessages.tokenUsage);
-
-      let assistantContent = '';
-      let provider = '';
-      let model = '';
-      let reasoningContent = null;
-
-      // 调用真正的 LLM（使用豆包模型）
-      await llmGateway.chatCompletionStream({
-        messages,
-        temperature: 0.7,
-        maxTokens: 4000,
-        taskType: 'chat_completion',
-        provider: 'ark',
-        model: process.env.DOUBAO_MODEL || 'doubao-seed-2-0-lite-260428',
-        onEvent: (streamEvent) => {
-          if (streamEvent.type === 'model_start' || streamEvent.type === 'model_status') {
-            provider = streamEvent.provider || provider;
-            model = streamEvent.model || model;
-            event.sender.send(channel, {
-              type: 'meta',
-              conversation_id: conversation.id,
-              provider,
-              model,
-              context_usage: contextUsagePayload(contextMessages.tokenUsage, model || provider),
-            });
-          }
-          if (streamEvent.type === 'status') {
-            event.sender.send(channel, {
-              type: 'status',
-              message: streamEvent.message || '正在处理...',
-              conversation_id: conversation.id,
-            });
-          }
-          if (streamEvent.type === 'reasoning_delta' && streamEvent.text) {
-            reasoningContent = (reasoningContent || '') + streamEvent.text;
-            event.sender.send(channel, {
-              type: 'reasoning_delta',
-              text: streamEvent.text,
-            });
-          }
-          if (streamEvent.type === 'delta' && streamEvent.text) {
-            assistantContent += streamEvent.text;
-            event.sender.send(channel, {
-              type: 'delta',
-              text: streamEvent.text,
-            });
-          }
-        },
-      });
-
-      conversationService.addMessage({
-        conversationId: conversation.id,
-        projectId,
-        role: 'assistant',
-        content: assistantContent,
-        metadata: {
-          type: 'chat_response',
-          provider,
-          model,
-          status: 'complete',
-          context_usage: contextUsagePayload(contextMessages.tokenUsage, model || provider),
-        },
-      });
-      event.sender.send(channel, {
-        type: 'done',
-        conversation_id: conversation.id,
-        provider,
-        model,
-        content: assistantContent,
-        error: null,
-        sources: [],
-        search_queries: [],
-        search_actions: [],
-        search_usage: {},
-        reasoning_content: reasoningContent,
-        context_usage: contextUsagePayload(contextMessages.tokenUsage, model || provider),
-      });
-      return {
-        type: 'done',
-        conversation_id: conversation.id,
-        provider,
-        model,
-        content: assistantContent,
-        error: null,
-        sources: [],
-        search_queries: [],
-        search_actions: [],
-        search_usage: {},
-        reasoning_content: reasoningContent,
-        context_usage: contextUsagePayload(contextMessages.tokenUsage, model || provider),
-      };
     } catch (error) {
+      const isAbort = error.name === 'AbortError' || abortController.signal.aborted;
+      if (isAbort) {
+        const cancelledEvent = {
+          type: 'cancelled',
+          conversation_id: payload.conversation_id || null,
+          error: null,
+        };
+        safeSend(event.sender, channel, cancelledEvent);
+        return cancelledEvent;
+      }
       const message = error.message || String(error);
-      event.sender.send(channel, { type: 'error', error: message });
+      safeSend(event.sender, channel, { type: 'error', error: message });
       return { type: 'error', error: message };
+    } finally {
+      activeStreams.delete(requestId);
     }
   });
 
@@ -1168,18 +1014,33 @@ function registerHandlers() {
     const requestId = request.requestId;
     const payload = request.payload || {};
     const channel = `geo-agent:run-agent-stream:${requestId}`;
+    const abortController = new AbortController();
+    activeStreams.set(requestId, { abortController, channel, sender: event.sender });
     try {
       const doneEvent = await agentRuntimeService.runChatStream({
         payload,
         sender: event.sender,
         channel,
+        signal: abortController.signal,
       });
-      event.sender.send(channel, doneEvent);
+      safeSend(event.sender, channel, doneEvent);
       return doneEvent;
     } catch (error) {
+      const isAbort = error.name === 'AbortError' || abortController.signal.aborted;
+      if (isAbort) {
+        const cancelledEvent = {
+          type: 'cancelled',
+          conversation_id: payload.conversation_id || null,
+          error: null,
+        };
+        safeSend(event.sender, channel, cancelledEvent);
+        return cancelledEvent;
+      }
       const message = error.message || String(error);
-      event.sender.send(channel, { type: 'error', error: message });
+      safeSend(event.sender, channel, { type: 'error', error: message });
       return { type: 'error', error: message };
+    } finally {
+      activeStreams.delete(requestId);
     }
   });
 
@@ -1304,11 +1165,14 @@ function registerHandlers() {
     const requestId = request.requestId;
     const payload = request.payload || {};
     const channel = `geo-agent:run-geo-source-discovery-stream:${requestId}`;
-    const projectId = payload.projectId || projectIdFromGeoProjectId(payload.geoProjectId || payload.geo_project_id);
-    let conversation = null;
-    let stageMessage = null;
+    const abortController = new AbortController();
+    activeStreams.set(requestId, { abortController, channel, sender: event.sender });
     try {
-      if (projectId) {
+      const projectId = payload.projectId || projectIdFromGeoProjectId(payload.geoProjectId || payload.geo_project_id);
+      let conversation = null;
+      let stageMessage = null;
+      try {
+        if (projectId) {
         let effectiveConversationId = payload.conversationId || payload.conversation_id || null;
         if (!effectiveConversationId) {
           const latest = conversationService.findLatestConversation(projectId, 'geo_workflow');
@@ -1330,14 +1194,14 @@ function registerHandlers() {
           platform: payload.platform,
         });
         if (runningMessage) {
-          event.sender.send(channel, {
+          safeSend(event.sender, channel, {
             type: 'meta',
             platform: payload.platform,
             phase: 3,
             conversation_id: conversation.id,
             message: runningMessage,
           });
-          event.sender.send(channel, {
+          safeSend(event.sender, channel, {
             type: 'done',
             status: 'already_running',
             already_running: true,
@@ -1366,7 +1230,7 @@ function registerHandlers() {
           },
         });
       }
-      event.sender.send(channel, {
+      safeSend(event.sender, channel, {
         type: 'meta',
         platform: payload.platform,
         phase: 3,
@@ -1374,7 +1238,7 @@ function registerHandlers() {
         message: stageMessage,
       });
       const discovery = await sourceDiscoveryService.generateSourceDiscoveryStream(payload, (streamEvent) => {
-        event.sender.send(channel, streamEvent);
+        safeSend(event.sender, channel, streamEvent);
       });
       if (conversation && projectId) {
         stageMessage = conversationService.updateConversationMessage({
@@ -1392,7 +1256,7 @@ function registerHandlers() {
           },
         });
       }
-      event.sender.send(channel, {
+      safeSend(event.sender, channel, {
         type: 'done',
         status: discovery.status || 'completed',
         conversation_id: conversation?.id,
@@ -1425,10 +1289,13 @@ function registerHandlers() {
           console.warn('[conversation] failed to archive source discovery error', archiveError);
         }
       }
-      event.sender.send(channel, { type: 'error', error: errorMessage, conversation_id: conversation?.id });
+      safeSend(event.sender, channel, { type: 'error', error: errorMessage, conversation_id: conversation?.id });
       return { type: 'error', error: errorMessage, conversation_id: conversation?.id };
     }
-  });
+  } finally {
+    activeStreams.delete(requestId);
+  }
+});
   ipcMain.handle('geo-agent:get-latest-geo-source-discovery', async (_event, geoProjectId, platform) => {
     try {
       return sourceDiscoveryService.getLatestSourceDiscovery(geoProjectId, platform);
@@ -1569,6 +1436,8 @@ function registerHandlers() {
 
     // 使用前端 requestId 构建 channel，确保事件能被前端正确接收。
     const channel = `geo-agent:run-geo-phase-two-report-stream:${requestId}`;
+    const abortController = new AbortController();
+    activeStreams.set(requestId, { abortController, channel, sender: event.sender });
     const projectId = projectIdFromGeoProjectId(geoProjectId);
     if (conversationId) {
       const row = getDb().prepare('SELECT project_id FROM conversations WHERE id = ?').get(conversationId);
@@ -1578,7 +1447,8 @@ function registerHandlers() {
     }
 
     try {
-      if (!conversationId) {
+      try {
+        if (!conversationId) {
         const latest = conversationService.findLatestConversation(projectId, 'geo_workflow');
         if (latest) {
           conversationId = latest.id;
@@ -1614,7 +1484,7 @@ function registerHandlers() {
       }
 
       // 鍙戦€?meta 浜嬩欢
-      event.sender.send(channel, {
+      safeSend(event.sender, channel, {
         type: 'meta',
         conversation_id: conversation.id,
         message: runningPromptMessage || { id: messageId || `assistant-${Date.now()}`, role: 'assistant', content: '' },
@@ -1626,7 +1496,7 @@ function registerHandlers() {
         platform,
         conversationId: conversation.id,
         onEvent: (streamEvent) => {
-          event.sender.send(channel, streamEvent);
+          safeSend(event.sender, channel, streamEvent);
         },
       });
 
@@ -1667,7 +1537,7 @@ function registerHandlers() {
       }
 
       // 鍙戦€?done 浜嬩欢
-      event.sender.send(channel, {
+      safeSend(event.sender, channel, {
         type: 'done',
         content: questionSet.questions.summary,
         status: 'completed',
@@ -1677,10 +1547,13 @@ function registerHandlers() {
       return { type: 'done', question_set: questionSet, message: resultMessage };
     } catch (error) {
       console.error('[geo-phase-two] 娴佸紡璋冪敤澶辫触:', error.message);
-      event.sender.send(channel, { type: 'error', error: error.message });
+      safeSend(event.sender, channel, { type: 'error', error: error.message });
       return { type: 'error', error: error.message };
     }
-  });
+  } finally {
+    activeStreams.delete(requestId);
+  }
+});
 
   // 阶段二：AI 问题池 - 非流式生成
   ipcMain.handle('geo-agent:run-geo-phase-two-report', async (_event, geoProjectId, platform = 'doubao', messageId = null) => {
@@ -1728,11 +1601,14 @@ function registerHandlers() {
     const payload = request.payload || request;
     const options = payload.options || {};
     const channel = `geo-agent:run-geo-support-articles-stream:${requestId}`;
+    const abortController = new AbortController();
+    activeStreams.set(requestId, { abortController, channel, sender: event.sender });
     const projectId = projectIdFromGeoProjectId(payload.geoProjectId || payload.geo_project_id);
     let conversation = null;
     let stageMessage = null;
     try {
-      if (projectId) {
+      try {
+        if (projectId) {
         let effectiveConversationId = options.conversationId || options.conversation_id || null;
         if (!effectiveConversationId) {
           const latest = conversationService.findLatestConversation(projectId, 'geo_workflow');
@@ -1754,14 +1630,14 @@ function registerHandlers() {
           platform: payload.platform || 'doubao',
         });
         if (runningMessage) {
-          event.sender.send(channel, {
+          safeSend(event.sender, channel, {
             type: 'meta',
             platform: payload.platform,
             phase: 4,
             conversation_id: conversation.id,
             message: runningMessage,
           });
-          event.sender.send(channel, {
+          safeSend(event.sender, channel, {
             type: 'done',
             status: 'already_running',
             already_running: true,
@@ -1790,7 +1666,7 @@ function registerHandlers() {
               parent_message_id: options.parentMessageId || null,
             },
           });
-          event.sender.send(channel, {
+          safeSend(event.sender, channel, {
             type: 'meta',
             platform: payload.platform,
             phase: 4,
@@ -1805,7 +1681,7 @@ function registerHandlers() {
           platform: payload.platform || 'doubao',
         },
         (streamEvent) => {
-          event.sender.send(channel, streamEvent);
+          safeSend(event.sender, channel, streamEvent);
         },
       );
       if (conversation && projectId) {
@@ -1839,7 +1715,7 @@ function registerHandlers() {
             metadata,
           });
       }
-      event.sender.send(channel, {
+      safeSend(event.sender, channel, {
         type: 'done',
         status: 'completed',
         conversation_id: conversation?.id,
@@ -1868,21 +1744,27 @@ function registerHandlers() {
           console.warn('[conversation] failed to archive support articles error', archiveError);
         }
       }
-      event.sender.send(channel, { type: 'error', error: error.message, conversation_id: conversation?.id });
+      safeSend(event.sender, channel, { type: 'error', error: error.message, conversation_id: conversation?.id });
       return { type: 'error', error: error.message, conversation_id: conversation?.id };
     }
-  });
+  } finally {
+    activeStreams.delete(requestId);
+  }
+});
 
   ipcMain.handle('geo-agent:run-geo-additional-articles-stream', async (event, request = {}) => {
     const requestId = request.requestId;
     const payload = request.payload || request;
     const options = payload.options || {};
     const channel = `geo-agent:run-geo-additional-articles-stream:${requestId}`;
+    const abortController = new AbortController();
+    activeStreams.set(requestId, { abortController, channel, sender: event.sender });
     const projectId = projectIdFromGeoProjectId(payload.geoProjectId || payload.geo_project_id);
     let conversation = null;
     let stageMessage = null;
     try {
-      if (projectId) {
+      try {
+        if (projectId) {
         conversation = conversationService.ensureConversation({
           projectId,
           conversationId: options.conversationId || options.conversation_id || null,
@@ -1902,7 +1784,7 @@ function registerHandlers() {
             platform: payload.platform || 'doubao',
           },
         });
-        event.sender.send(channel, {
+        safeSend(event.sender, channel, {
           type: 'meta',
           platform: payload.platform,
           phase: 4,
@@ -1918,7 +1800,7 @@ function registerHandlers() {
           articleRole: options.articleRole || options.article_role || 'auto',
           instruction: options.instruction || '',
         },
-        (streamEvent) => event.sender.send(channel, streamEvent),
+        (streamEvent) => safeSend(event.sender, channel, streamEvent),
       );
       if (conversation && stageMessage && projectId) {
         stageMessage = conversationService.updateConversationMessage({
@@ -1937,7 +1819,7 @@ function registerHandlers() {
           },
         });
       }
-      event.sender.send(channel, {
+      safeSend(event.sender, channel, {
         type: 'done',
         status: 'completed',
         conversation_id: conversation?.id,
@@ -1960,10 +1842,13 @@ function registerHandlers() {
           console.warn('[conversation] failed to archive additional articles error', archiveError);
         }
       }
-      event.sender.send(channel, { type: 'error', error: message, conversation_id: conversation?.id });
+      safeSend(event.sender, channel, { type: 'error', error: message, conversation_id: conversation?.id });
       return { type: 'error', error: message, conversation_id: conversation?.id };
     }
-  });
+  } finally {
+    activeStreams.delete(requestId);
+  }
+});
 
   ipcMain.handle('geo-agent:get-latest-geo-article-draft', async (_event, geoProjectId, platform = 'doubao', articleType = null) => {
     return articleDraftService.getLatestArticleDraft(geoProjectId, platform, articleType);
@@ -2083,19 +1968,25 @@ function registerHandlers() {
     const requestId = request.requestId;
     const payload = request.payload || request;
     const channel = `geo-agent:run-visibility-check-stream:${requestId}`;
+    const abortController = new AbortController();
+    activeStreams.set(requestId, { abortController, channel, sender: event.sender });
     try {
-      const check = await visibilityCheckService.runVisibilityCheckStream(payload, (streamEvent) => {
-        event.sender.send(channel, streamEvent);
-      });
-      event.sender.send(channel, { type: 'done', status: check.status, visibility_check: check });
+      try {
+        const check = await visibilityCheckService.runVisibilityCheckStream(payload, (streamEvent) => {
+          safeSend(event.sender, channel, streamEvent);
+        });
+      safeSend(event.sender, channel, { type: 'done', status: check.status, visibility_check: check });
       return { type: 'done', visibility_check: check };
     } catch (error) {
       const message = error.message || String(error);
       console.error('[visibility-check] 运行失败:', message);
-      event.sender.send(channel, { type: 'error', error: message });
+      safeSend(event.sender, channel, { type: 'error', error: message });
       return { type: 'error', error: message };
     }
-  });
+  } finally {
+    activeStreams.delete(requestId);
+  }
+});
 
   ipcMain.handle('geo-agent:get-latest-visibility-check', async (_event, geoProjectId, platform = 'doubao') => {
     return visibilityCheckService.getLatestVisibilityCheck(geoProjectId, platform);
@@ -2129,18 +2020,23 @@ function registerHandlers() {
     return autoLearningScheduler.getStatus();
   });
 
-  ipcMain.handle('geo-agent:trigger-auto-learning-now', async (event) => {
-    const requestId = `auto-learn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  ipcMain.handle('geo-agent:trigger-auto-learning-now', async (event, request = {}) => {
+    const requestId = request.requestId || `auto-learn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const channel = `geo-agent:trigger-auto-learning-stream:${requestId}`;
+    const abortController = new AbortController();
+    activeStreams.set(requestId, { abortController, channel, sender: event.sender });
 
     autoLearningScheduler.runCycle()
       .then((result) => {
-        event.sender.send(channel, { type: 'result', result });
-        event.sender.send(channel, { type: 'done' });
+        safeSend(event.sender, channel, { type: 'result', result });
+        safeSend(event.sender, channel, { type: 'done' });
       })
       .catch((error) => {
-        event.sender.send(channel, { type: 'error', message: error.message });
-        event.sender.send(channel, { type: 'done' });
+        safeSend(event.sender, channel, { type: 'error', message: error.message });
+        safeSend(event.sender, channel, { type: 'done' });
+      })
+      .finally(() => {
+        activeStreams.delete(requestId);
       });
 
     return { requestId, channel };
@@ -2180,19 +2076,23 @@ function registerHandlers() {
     const requestId = request.requestId;
     const payload = request.payload || {};
     const channel = `geo-agent:generate-website-stream:${requestId}`;
+    const abortController = new AbortController();
+    activeStreams.set(requestId, { abortController, channel, sender: event.sender });
     const { projectId, ...options } = payload;
 
     console.log('[WebBuilder] generate-website-stream called', { requestId, projectId, options });
 
     try {
       await webBuilderService.generateWebsite(projectId, options, (streamEvent) => {
-        event.sender.send(channel, streamEvent);
+        safeSend(event.sender, channel, streamEvent);
       });
       // 只有成功时才发 done；generateWebsite 内部已发 done，这里不再重复
     } catch (err) {
       console.error('[WebBuilder] generate error:', err);
-      event.sender.send(channel, { type: 'error', error: err.message || String(err) });
+      safeSend(event.sender, channel, { type: 'error', error: err.message || String(err) });
       // 不发 done，让 invokeStream 保持 reject 状态
+    } finally {
+      activeStreams.delete(requestId);
     }
     return { type: 'done' };
   });
@@ -2245,10 +2145,29 @@ registerHandlers();
 // 全局异常处理
 process.on('uncaughtException', (error) => {
   console.error('[主进程] 未捕获的异常:', error);
+  try {
+    const { BrowserWindow } = require('electron');
+    BrowserWindow.getAllWindows().forEach((win) => {
+      if (!win.isDestroyed()) {
+        win.webContents.send('main-process-error', { type: 'uncaughtException', message: error.message || String(error) });
+      }
+    });
+  } catch (_) { /* 忽略通知失败 */ }
+  setTimeout(() => process.exit(1), 500);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('[主进程] 未处理的 Promise rejection:', reason);
+process.on('unhandledRejection', (reason) => {
+  const message = reason instanceof Error ? `${reason.message}\n${reason.stack || ''}` : String(reason);
+  console.error('[主进程] 未处理的 Promise rejection:', message);
+  try {
+    const { BrowserWindow } = require('electron');
+    BrowserWindow.getAllWindows().forEach((win) => {
+      if (!win.isDestroyed()) {
+        win.webContents.send('main-process-error', { type: 'unhandledRejection', message });
+      }
+    });
+  } catch (_) { /* 忽略通知失败 */ }
+  setTimeout(() => process.exit(1), 500);
 });
 
 app.whenReady().then(async () => {
@@ -2261,6 +2180,7 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   autoLearningScheduler.stop();
+  clearAllActiveStreams();
   closeDatabase();
 });
 

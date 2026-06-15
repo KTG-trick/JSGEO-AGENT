@@ -1004,6 +1004,33 @@ function buildDraftDiff(payload = {}) {
   };
 }
 
+async function buildKnowledgeUpdateProposal(payload = {}) {
+  const draft = await createKnowledgeDraftStrict({
+    ...payload,
+    intent: payload.intent || 'update',
+  });
+  if (draft.status === 'failed' || draft.error_message) {
+    throw new Error(draft.error_message || '资料解析或抽取失败，请检查上传内容后重试。');
+  }
+
+  const projectId = payload.project_id || payload.projectId || draft.project_id;
+  if (!projectId) throw new Error('projectId is required.');
+
+  const draftProfile = normalizeProfile(draft.profile || {});
+  const existingProfile = projectExists(projectId)
+    ? getKnowledgeProfile(projectId).profile
+    : {};
+  const diff = diffProfiles(existingProfile || {}, draftProfile);
+
+  return {
+    draftId: draft.id,
+    projectId,
+    diff,
+    draftProfile,
+    existingProfile,
+  };
+}
+
 async function applyDraftDiff(payload = {}) {
   const draftId = payload.draftId || payload.id;
   if (!draftId) throw new Error('draftId is required.');
@@ -1869,6 +1896,7 @@ async function createKnowledgeDraftStrict(payload = {}, onEvent = null) {
 module.exports = {
   applyDraftDiff,
   buildDraftDiff,
+  buildKnowledgeUpdateProposal,
   confirmKnowledgeDraft,
   createKnowledgeAsset,
   createKnowledgeDraft: createKnowledgeDraftStrict,

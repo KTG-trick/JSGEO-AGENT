@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(awk '{print $5}')",
+      "Bash(taskkill /F /PID 13000)",
+      "PowerShell(Stop-Process -Id 13000 -Force)",
+      "Read(//c/Users/33606/AppData/Local/Temp/claude/d--CodeSpace/Dev/JSGEO-AGENT/e9db1c03-374c-4572-b144-050cb511d8ee/tasks/**)",
+      "Bash(node -e \"console.log\\(require\\('electron/package.json'\\).version\\)\")",
+      "Bash(node -e \"const e = require\\('electron'\\); console.log\\(typeof e, Array.isArray\\(e\\), e.app\\)\")",
+      "Bash(./node_modules/.bin/electron .)",
+      "Bash(git stash *)"
+    ]
+  }
+}

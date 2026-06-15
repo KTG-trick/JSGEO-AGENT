@@ -41,6 +41,23 @@ function getStatusCode(error) {
 }
 
 /**
+ * 对错误进行简单分类，用于向用户展示重试原因
+ */
+function classifyErrorType(error, statusCode, externalSignal) {
+  if (error && error.name === 'AbortError' && externalSignal && !externalSignal.aborted) {
+    return 'timeout';
+  }
+  if (error && (error.code === 'ENOTFOUND' || error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT')) {
+    return 'network';
+  }
+  const retryableStatusCodes = [408, 429, 500, 502, 503, 504];
+  if (statusCode && retryableStatusCodes.includes(statusCode)) {
+    return 'server';
+  }
+  return 'api';
+}
+
+/**
  * 带超时和重试的 fetch 封装
  * @param {string} url - 请求 URL
  * @param {Object} options - fetch 选项
@@ -53,12 +70,25 @@ async function fetchWithRetry(url, options = {}, retryOptions = {}) {
     maxRetries = 3,         // 默认重试 3 次
     retryDelay = 1000,      // 初始重试延迟 1 秒
     retryBackoff = 2,       // 指数退避倍数
+    signal: externalSignal, // 外部取消信号
+    onRetry,                // 每次重试前的回调
   } = retryOptions;
 
   let lastError;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (externalSignal?.aborted) {
+      const abortError = new Error('AbortError');
+      abortError.name = 'AbortError';
+      throw abortError;
+    }
+
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
+    let onAbort;
+    if (externalSignal) {
+      onAbort = () => controller.abort();
+      externalSignal.addEventListener('abort', onAbort);
+    }
 
     try {
       const response = await fetch(url, {
@@ -66,10 +96,17 @@ async function fetchWithRetry(url, options = {}, retryOptions = {}) {
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
+      if (externalSignal && onAbort) {
+        externalSignal.removeEventListener('abort', onAbort);
+      }
 
       // 如果响应状态码需要重试，且还有重试次数
       if (shouldRetry(null, response.status) && attempt < maxRetries) {
         const delay = retryDelay * Math.pow(retryBackoff, attempt);
+        const errorType = classifyErrorType(null, response.status, externalSignal);
+        if (typeof onRetry === 'function') {
+          onRetry({ attempt: attempt + 1, maxRetries, error: null, errorType, statusCode: response.status });
+        }
         console.log(`[API] 请求失败 (HTTP ${response.status})，${delay}ms 后重试 (${attempt + 1}/${maxRetries})...`);
         await sleep(delay);
         continue;
@@ -78,11 +115,23 @@ async function fetchWithRetry(url, options = {}, retryOptions = {}) {
       return response;
     } catch (error) {
       clearTimeout(timeoutId);
+      if (externalSignal && onAbort) {
+        externalSignal.removeEventListener('abort', onAbort);
+      }
       lastError = error;
+
+      // 外部取消信号导致的 AbortError 不重试
+      if (externalSignal?.aborted) {
+        throw error;
+      }
 
       // 如果错误可以重试，且还有重试次数
       if (attempt < maxRetries && shouldRetry(error)) {
         const delay = retryDelay * Math.pow(retryBackoff, attempt);
+        const errorType = classifyErrorType(error, null, externalSignal);
+        if (typeof onRetry === 'function') {
+          onRetry({ attempt: attempt + 1, maxRetries, error, errorType, statusCode: null });
+        }
         console.log(`[API] 请求失败 (${error.message})，${delay}ms 后重试 (${attempt + 1}/${maxRetries})...`);
         await sleep(delay);
         continue;

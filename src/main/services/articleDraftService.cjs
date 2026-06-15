@@ -463,22 +463,27 @@ async function generateDraftForSlot({ projectId, platform, profile, questionSet,
     messages[1].content = JSON.stringify(userPayload);
   }
 
-  const result = await streamLLM({
-    messages,
-    temperature: 0.35,
-    maxTokens: 6000,
-    provider: policy.provider,
-    model: policy.model,
-    networkMode: policy.network_mode,
-    deepThinking: policy.deep_thinking,
-    taskType: 'support_content_generation',
-    apiFamily: policy.api_family,
-    onEvent: (event) => {
-      if (event.type === 'reasoning_delta') {
-        onEvent?.(event);
-      }
-    },
-  });
+  let result;
+  try {
+    result = await streamLLM({
+      messages,
+      temperature: 0.35,
+      maxTokens: 6000,
+      provider: policy.provider,
+      model: policy.model,
+      networkMode: policy.network_mode,
+      deepThinking: policy.deep_thinking,
+      taskType: 'support_content_generation',
+      apiFamily: policy.api_family,
+      onEvent: (event) => {
+        if (event.type === 'reasoning_delta') {
+          onEvent?.(event);
+        }
+      },
+    });
+  } catch (error) {
+    throw new Error(`「${slot.theme}」模型调用失败：${error.message || String(error)}`);
+  }
   const parsed = parseDraftContent(result.content);
   return normalizeDraftPayload(parsed, slot, context);
 }
@@ -511,22 +516,27 @@ async function generateAdditionalDraftForSlot({ projectId, platform, profile, qu
     additionalMessages[1].content = JSON.stringify(additionalPayload);
   }
 
-  const result = await streamLLM({
-    messages: additionalMessages,
-    temperature: 0.38,
-    maxTokens: 6000,
-    provider: policy.provider,
-    model: policy.model,
-    networkMode: policy.network_mode,
-    deepThinking: policy.deep_thinking,
-    taskType: 'support_content_generation',
-    apiFamily: policy.api_family,
-    onEvent: (event) => {
-      if (event.type === 'reasoning_delta') {
-        onEvent?.(event);
-      }
-    },
-  });
+  let result;
+  try {
+    result = await streamLLM({
+      messages: additionalMessages,
+      temperature: 0.38,
+      maxTokens: 6000,
+      provider: policy.provider,
+      model: policy.model,
+      networkMode: policy.network_mode,
+      deepThinking: policy.deep_thinking,
+      taskType: 'support_content_generation',
+      apiFamily: policy.api_family,
+      onEvent: (event) => {
+        if (event.type === 'reasoning_delta') {
+          onEvent?.(event);
+        }
+      },
+    });
+  } catch (error) {
+    throw new Error(`追加生成「${slot.theme}」模型调用失败：${error.message || String(error)}`);
+  }
   const parsed = parseDraftContent(result.content);
   const draft = normalizeDraftPayload(parsed, slot, context);
   return {
@@ -626,19 +636,32 @@ async function generateSupportArticles({ geoProjectId, platform = 'doubao', onEv
   const { projectId, profile, questionSet, discovery } = requiredInputs({ geoProjectId, platform });
   const slots = [...SUPPORT_PLAN, ...RANKING_PLAN];
   const drafts = [];
+  const errors = [];
   for (let index = 0; index < slots.length; index += 1) {
     const slot = slots[index];
-    const draft = await generateDraftForSlot({
-      projectId,
-      platform,
-      profile,
-      questionSet,
-      discovery,
-      slot,
-      index,
-      onEvent,
-    });
-    drafts.push(insertDraft({ projectId, platform, questionSetId: questionSet.id, draft }));
+    try {
+      const draft = await generateDraftForSlot({
+        projectId,
+        platform,
+        profile,
+        questionSet,
+        discovery,
+        slot,
+        index,
+        onEvent,
+      });
+      drafts.push(insertDraft({ projectId, platform, questionSetId: questionSet.id, draft }));
+    } catch (error) {
+      const message = error.message || String(error);
+      console.error(`[articleDraft] slot ${index} (${slot.theme}) 生成失败:`, message);
+      errors.push({ slot: slot.theme, error: message });
+      onEvent?.({
+        type: 'status',
+        step_index: index,
+        step_label: `${slot.theme} 生成失败`,
+        message: `「${slot.theme}」生成失败：${message}`,
+      });
+    }
   }
   const consultingDraft = drafts.find((draft) => draft.draft.article_type === 'brand_profile') || drafts[0] || null;
   const reviewDraft = drafts.find((draft) => draft.draft.article_type === 'business_review') || drafts[3] || null;
@@ -647,13 +670,15 @@ async function generateSupportArticles({ geoProjectId, platform = 'doubao', onEv
     geo_project_id: `geo-${projectId}`,
     enterprise_project_id: projectId,
     platform,
-    status: 'completed',
+    status: errors.length === 0 ? 'completed' : (drafts.length > 0 ? 'partial_failed' : 'failed'),
     consulting_draft: consultingDraft,
     review_draft: reviewDraft,
     support_drafts: drafts.filter((draft) => draft.draft.article_role === 'support'),
     ranking_drafts: rankingDrafts,
     total: drafts.length,
-    error_message: null,
+    error_message: errors.length > 0
+      ? errors.map((e) => `${e.slot}: ${e.error}`).join('\n')
+      : null,
   };
 }
 
@@ -700,15 +725,27 @@ async function generateAdditionalArticles({ geoProjectId, platform = 'doubao', c
 }
 
 async function generateAdditionalArticlesStream(payload = {}, onEvent = null) {
-  const result = await generateAdditionalArticles({ ...payload, onEvent });
-  onEvent?.({ type: 'result', additional_articles: result });
-  return result;
+  try {
+    const result = await generateAdditionalArticles({ ...payload, onEvent });
+    onEvent?.({ type: 'result', additional_articles: result });
+    return result;
+  } catch (error) {
+    const message = error.message || String(error);
+    onEvent?.({ type: 'error', error: message });
+    throw error;
+  }
 }
 
 async function generateSupportArticlesStream(payload = {}, onEvent = null) {
-  const result = await generateSupportArticles({ ...payload, onEvent });
-  onEvent?.({ type: 'result', support_articles: result });
-  return result;
+  try {
+    const result = await generateSupportArticles({ ...payload, onEvent });
+    onEvent?.({ type: 'result', support_articles: result });
+    return result;
+  } catch (error) {
+    const message = error.message || String(error);
+    onEvent?.({ type: 'error', error: message });
+    throw error;
+  }
 }
 
 function getArticleDraft(articleId) {

@@ -1,15 +1,22 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-function invokeStream(channelName, payload, onEvent) {
+function invokeStream(channelName, payload, onEvent, timeoutMs = 120000) {
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const channel = `${channelName}:${requestId}`;
-  return new Promise((resolve, reject) => {
-    const cleanup = () => ipcRenderer.removeListener(channel, listener);
+  const promise = new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      ipcRenderer.removeListener(channel, listener);
+    };
+    const timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new Error('请求超时，请稍后重试。'));
+    }, timeoutMs);
     const listener = (_event, streamEvent) => {
       if (typeof onEvent === 'function') {
         onEvent(streamEvent);
       }
-      if (streamEvent.type === 'done') {
+      if (streamEvent.type === 'done' || streamEvent.type === 'cancelled') {
         cleanup();
         resolve(streamEvent);
       }
@@ -25,6 +32,7 @@ function invokeStream(channelName, payload, onEvent) {
       reject(error);
     });
   });
+  return { promise, requestId };
 }
 
 contextBridge.exposeInMainWorld('geoAgent', {
@@ -36,6 +44,9 @@ contextBridge.exposeInMainWorld('geoAgent', {
   onWindowMaximizedChanged: (callback) => {
     ipcRenderer.on('geo-agent:window-maximized-changed', (_, isMaximized) => callback(isMaximized));
   },
+  onMainProcessError: (callback) => {
+    ipcRenderer.on('main-process-error', (_, detail) => callback(detail));
+  },
   healthCheck: () => ipcRenderer.invoke('geo-agent:health-check'),
   getConfigStatus: () => ipcRenderer.invoke('geo-agent:get-config-status'),
   getSettings: () => ipcRenderer.invoke('geo-agent:get-settings'),
@@ -45,6 +56,7 @@ contextBridge.exposeInMainWorld('geoAgent', {
     const selectedModel = legacySignature ? selectedModelOrOptions : null;
     const options = legacySignature ? (optionsOrEvent || {}) : (selectedModelOrOptions || {});
     const onEvent = legacySignature ? maybeOnEvent : optionsOrEvent;
+    const timeoutMs = options.timeoutMs || 120000;
     const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const channel = `geo-agent:chat-stream:${requestId}`;
     const payload = {
@@ -56,13 +68,22 @@ contextBridge.exposeInMainWorld('geoAgent', {
       attachment_ids: options.attachmentIds || options.attachment_ids,
     };
 
-    return new Promise((resolve, reject) => {
-      const cleanup = () => ipcRenderer.removeListener(channel, listener);
+    const promise = new Promise((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timeoutId);
+        ipcRenderer.removeListener(channel, listener);
+      };
+      const timeoutId = setTimeout(() => {
+        cleanup();
+        // 超时后尝试通知主进程取消，避免后台继续运行
+        ipcRenderer.invoke('geo-agent:cancel-stream', { requestId }).catch(() => undefined);
+        reject(new Error('请求超时，请稍后重试。'));
+      }, timeoutMs);
       const listener = (_event, streamEvent) => {
         if (typeof onEvent === 'function') {
           onEvent(streamEvent);
         }
-        if (streamEvent.type === 'done') {
+        if (streamEvent.type === 'done' || streamEvent.type === 'cancelled') {
           cleanup();
           resolve(streamEvent);
         }
@@ -78,16 +99,56 @@ contextBridge.exposeInMainWorld('geoAgent', {
         reject(error);
       });
     });
+
+    return { promise, requestId };
   },
-  runAgentStream: (message, conversationId, options = {}, onEvent) => invokeStream('geo-agent:run-agent-stream', {
-    message,
-    conversation_id: conversationId,
-    skill_id: options.skillId,
-    project_id: options.projectId,
-    platform: options.platform,
-  }, onEvent),
+  runAgentStream: (message, conversationId, options = {}, onEvent) => {
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const timeoutMs = options.timeoutMs || 120000;
+    const channel = `geo-agent:run-agent-stream:${requestId}`;
+    const payload = {
+      message,
+      conversation_id: conversationId,
+      skill_id: options.skillId,
+      project_id: options.projectId,
+      platform: options.platform,
+    };
+    const promise = new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        settled = true;
+        clearTimeout(timeoutId);
+        ipcRenderer.removeListener(channel, listener);
+      };
+      const timeoutId = setTimeout(() => {
+        cleanup();
+        ipcRenderer.invoke('geo-agent:cancel-stream', { requestId }).catch(() => undefined);
+        reject(new Error('请求超时，请稍后重试。'));
+      }, timeoutMs);
+      const listener = (_event, streamEvent) => {
+        if (typeof onEvent === 'function') {
+          onEvent(streamEvent);
+        }
+        if (streamEvent.type === 'done' || streamEvent.type === 'cancelled') {
+          cleanup();
+          resolve(streamEvent);
+        }
+        if (streamEvent.type === 'error') {
+          cleanup();
+          reject(new Error(streamEvent.error || 'Agent stream failed'));
+        }
+      };
+      ipcRenderer.on(channel, listener);
+      ipcRenderer.invoke('geo-agent:run-agent-stream', { requestId, payload }).catch((error) => {
+        cleanup();
+        reject(error);
+      });
+    });
+    return { promise, requestId };
+  },
   approveAgentAction: (payload = {}) => ipcRenderer.invoke('geo-agent:approve-agent-action', payload),
   rejectAgentAction: (payload = {}) => ipcRenderer.invoke('geo-agent:reject-agent-action', payload),
+  cancelStream: (requestId) => ipcRenderer.invoke('geo-agent:cancel-stream', { requestId }),
   sendChat: (message, conversationId, selectedModelOrOptions = null, maybeOptions = {}) => {
     const selectedModel = typeof selectedModelOrOptions === 'string' ? selectedModelOrOptions : null;
     const options = typeof selectedModelOrOptions === 'string' ? maybeOptions : (selectedModelOrOptions || {});
@@ -200,6 +261,7 @@ contextBridge.exposeInMainWorld('geoAgent', {
   confirmKnowledgeDraft: (draftId, profile, conversationId = null, draft = null) => ipcRenderer.invoke('geo-agent:confirm-knowledge-draft', { draftId, profile, conversationId, draft }),
   rejectKnowledgeDraft: (draftId) => ipcRenderer.invoke('geo-agent:reject-knowledge-draft', draftId),
   buildKnowledgeDiff: (projectId, draftId) => ipcRenderer.invoke('geo-agent:build-knowledge-diff', { projectId, draftId }),
+  buildKnowledgeUpdateProposal: (payload) => ipcRenderer.invoke('geo-agent:build-knowledge-update-proposal', payload),
   applyKnowledgeDiff: (payload) => ipcRenderer.invoke('geo-agent:apply-knowledge-diff', payload),
   reindexKnowledge: (projectId) => ipcRenderer.invoke('geo-agent:reindex-knowledge', projectId),
   getKnowledgeIndexStatus: (projectId) => ipcRenderer.invoke('geo-agent:get-knowledge-index-status', projectId),
